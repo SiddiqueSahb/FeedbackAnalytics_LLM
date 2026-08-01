@@ -5,10 +5,18 @@ class Settings(BaseSettings):
     # Data paths
     DATA_PATH:             str = "data/processed/reviews_unified.parquet"
     RAW_DATA_PATH:         str = "data/raw"
+    MODEL_PATH:            str = "models/distilbert-finetuned-final"
 
     # MLflow (free, local) 
     MLFLOW_TRACKING_URI:  str = "mlruns"      #This tells MLflow where to save experiment data.URI is simply the address or location that MLflow uses to read and write experiment information.
     MLFLOW_EXPERIMENT:    str = "Feedback_Sentiment"  #This is simply the name of your experiment
+
+    #Sentiment model 
+    ROBERTA_MODEL: str = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
 
 
 settings = Settings()
