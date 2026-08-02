@@ -17,7 +17,7 @@ Prerequisites:
     3. Fine-tuned DistilBERT in models/distilbert-finetuned/ (optional)
 """
 
-from __future__ import annotations
+
 import os,sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,11 +61,13 @@ if not os.path.exists(settings.DATA_PATH):
     print(f"{RED} Data not found. Run: python scripts/preprocess.py{RESET}")
     sys.exit(1)
 
-df:pd.DataFrame= pd.read_parquet(settings.DATA_PATH)
-df = df.dropna(subset=["cleaned_text","sentiment_label"])
+df: pd.DataFrame = pd.read_parquet(settings.DATA_PATH)
+df = df.dropna(subset=["cleaned_text", "sentiment_label"])
 df = df[df["cleaned_text"].str.len() > 5]
-label_map:dict[str,int] = {"negative":0,"neutral":1,"positive":2}
-label_names:list[str] = ["negative","neutral","positive"]
+label_map:   dict[str, int] = {"negative": 0, "neutral": 1, "positive": 2}
+label_names: list[str]      = ["negative", "neutral", "positive"]
+df["label_id"] = df["sentiment_label"].map(label_map)
+df = df.dropna(subset=["label_id"])
 df["label_id"] = df["label_id"].astype(int)
 
 _,test_df = train_test_split(df,test_size=0.2,random_state=42,stratify=df["label_id"])
@@ -86,7 +88,7 @@ def evaluate_and_log(model_name:str,preds:list[int],model_type:str,params:dict[s
     f1w  = f1_score(y_true, preds, average="weighted", zero_division=0)
     prec = precision_score(y_true, preds, average="macro", zero_division=0)
     rec  = recall_score(y_true, preds, average="macro",    zero_division=0)
-    cm   = list(confusion_matrix(y_true, preds))
+    cm   = cm = confusion_matrix(y_true, preds).tolist()
 
     metrics: dict[str, float] = {
         "accuracy":    round(acc,  4),
@@ -98,7 +100,7 @@ def evaluate_and_log(model_name:str,preds:list[int],model_type:str,params:dict[s
 
     # Log to MLflow 
     with mlflow.start_run(run_name=model_name):
-        # Tags
+        # Tags - mlflow.set_tags() is used to store metadata about an experiment run.
         mlflow.set_tags({
             "model_name": model_name,
             "model_type": model_type,   # classical_ml / rule_based / transformer
@@ -108,18 +110,25 @@ def evaluate_and_log(model_name:str,preds:list[int],model_type:str,params:dict[s
 
         # Parameters
         if params:
+            print(params)
+            print(type(params))
+            print("Logging params...")
             mlflow.log_params(params)
+            
 
         # Metrics
+        print("Logging metrics...")
         mlflow.log_metrics(metrics)
 
         # Confusion matrix as JSON artifact
+        print("Saving confusion matrix...")
         cm_path = f"data/results/cm_{model_name.replace(' ', '_').lower()}.json"
         with open(cm_path, "w") as f:
             json.dump({"confusion_matrix": cm, "labels": label_names}, f, indent=2)
         mlflow.log_artifact(cm_path, artifact_path="confusion_matrices")
 
         # Classification report as artifact
+        print("Saving report...")
         report = classification_report(
             y_true, preds, target_names=label_names, digits=4, output_dict=True
         )
@@ -130,6 +139,7 @@ def evaluate_and_log(model_name:str,preds:list[int],model_type:str,params:dict[s
 
         # Log sklearn model if provided (enables model registry)
         if sklearn_model is not None:
+            print("Logging sklearn model...")
             mlflow.sklearn.log_model(sklearn_model, artifact_path="model")
 
     all_results[model_name] = metrics
@@ -139,7 +149,7 @@ def evaluate_and_log(model_name:str,preds:list[int],model_type:str,params:dict[s
     return metrics
 
 
-# ── Model 1: Naive Bayes ──────────────────────────────────────────────────────
+# Model 1: Naive Bayes
 header("Model 1 — Naive Bayes (TF-IDF)  [Classical ML Baseline]")
 try:
     from nlp.classical_models import NaiveBayesSentiment
@@ -159,7 +169,7 @@ except Exception as e:
     print(f"  {RED} Failed: {e}{RESET}")
 
 
-# ── Model 2: Logistic Regression ─────────────────────────────────────────────
+#Model 2: Logistic Regression
 header("Model 2 — Logistic Regression (TF-IDF)  [Classical ML Baseline]")
 try:
     from nlp.classical_models import LogisticRegressionSentiment
@@ -180,7 +190,7 @@ except Exception as e:
     print(f"  {RED}  Failed: {e}{RESET}")
 
 
-# ── Model 3: VADER ────────────────────────────────────────────────────────────
+# Model 3: VADER
 header("Model 3 — VADER  [Rule-based Baseline]")
 try:
     from nlp.sentiment import VaderSentiment
@@ -196,7 +206,7 @@ except Exception as e:
     print(f"  {RED}  Failed: {e}{RESET}")
 
 
-# ── Model 4: RoBERTa ──────────────────────────────────────────────────────────
+# Model 4: RoBERTa
 header("Model 4 — RoBERTa  [Pre-trained Transformer]")
 print("  Loading RoBERTa (downloads ~500 MB on first run)...")
 try:
@@ -214,7 +224,7 @@ except Exception as e:
     print(f"  {RED}  Failed: {e}{RESET}")
 
 
-# ── Model 5: DistilBERT Fine-tuned ────────────────────────────────────────────
+# Model 5: DistilBERT Fine-tuned 
 header("Model 5 — DistilBERT (Fine-tuned)  [YOUR CONTRIBUTION]")
 try:
     from nlp.sentiment import FineTunedSentiment
@@ -238,7 +248,7 @@ except Exception as e:
 
 
 
-# ── Print dissertation results table ─────────────────────────────────────────
+# Print dissertation results table
 if all_results:
     header("DISSERTATION RESULTS TABLE")
 
@@ -285,6 +295,7 @@ if all_results:
         "RoBERTa (pre-trained)":    "FeedbackIQ-RoBERTa",
         "DistilBERT (fine-tuned)":  "FeedbackIQ-DistilBERT",
     }
+    #just chnaging the name 
     reg_name = registry_name_map.get(best_model, "FeedbackIQ-BestModel")
 
 
@@ -303,7 +314,7 @@ if all_results:
                 model_uri = f"runs:/{run_id}/model"
                 try:
                     mv = mlflow.register_model(model_uri, reg_name)
-                    print(f"  {GREEN}✔  Best model '{best_model}' registered as '{reg_name}' "
+                    print(f"  {GREEN}  Best model '{best_model}' registered as '{reg_name}' "
                           f"v{mv.version}{RESET}")
 
                     # Promote to Production
@@ -313,12 +324,12 @@ if all_results:
                         stage="Production",
                         archive_existing_versions=True,
                     )
-                    print(f"  {GREEN}✔  {reg_name} v{mv.version} promoted to 'Production'{RESET}")
+                    print(f"  {GREEN}  {reg_name} v{mv.version} promoted to 'Production'{RESET}")
                 except Exception as exc:
-                    print(f"  {YELLOW}ℹ  Registry stage transition not supported in this "
+                    print(f"  {YELLOW}  Registry stage transition not supported in this "
                           f"MLflow version ({exc.__class__.__name__}) — model logged without stage{RESET}")
     except Exception as exc:
-        print(f"  {YELLOW}ℹ  Model Registry step skipped: {exc}{RESET}")
+        print(f"  {YELLOW}  Model Registry step skipped: {exc}{RESET}")
 
     print(f"""
 {CYAN}{BOLD}MLflow Dashboard:{RESET}

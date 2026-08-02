@@ -9,6 +9,7 @@ Five sentiment classifiers for dissertation comparison:
 
 from __future__ import annotations
 import sys,os
+import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import Optional
@@ -20,8 +21,8 @@ class VaderSentiment:
     """Rule-based sentiment analyser using VADER compound score."""
 
     def __init__(self)-> None:
-        from vaderSentiment.vaderSentiment import SentimentAnalyzer
-        self.analyzer = SentimentAnalyzer()
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        self.analyzer = SentimentIntensityAnalyzer()
 
     def predict(self,text:str) -> dict[str,object]:
         """Return sentiment label, confidence, and per-class scores."""
@@ -53,7 +54,7 @@ class RobertaSentiment:
         cardiffnlp/twitter-roberta-base-sentiment-latest — pre-trained, not fine-tuned.
         Represents the upper bound for transfer learning without task-specific training.
     """
-    def init(self) -> None:
+    def __init__(self) -> None:
         from transformers import pipeline
         self.pipe = pipeline("text-classification",model=settings.ROBERTA_MODEL,top_k=None,truncation=True, max_length=512)
 
@@ -95,9 +96,9 @@ class FineTunedSentiment:
             if not os.path.exists(model_path):
                 print(f" Fine-tuned model not found at {model_path}. "
                   f"Run fine-tuning on Colab first. Falling back to RoBERTa.")
-            self._fallback: Optional[RobertaSentiment] = RobertaSentiment()
-            self._loaded   = False
-            return
+                self._fallback: Optional[RobertaSentiment] = RobertaSentiment()
+                self._loaded   = False
+                return
         
             from transformers import AutoTokenizer, AutoModelForSequenceClassification
             import torch
@@ -246,3 +247,24 @@ def compare_all(text:str) -> dict[str,dict[str,object]]:
             "error": str(e)}
 
     return results
+
+
+if __name__ == "__main__":
+    test_text = "The product arrived quickly and was easy to install. However, it disconnects several times a day, the battery lasts less than three hours, and customer support has not responded to my emails. Overall, I cannot recommend this product."
+    
+
+    results = compare_all(test_text)
+
+    print("\n" + "=" * 70)
+    print(f"Input: {test_text}")
+    print("=" * 70)
+
+    for model_name, result in results.items():
+        print(f"\nModel: {model_name}")
+        print(f"Label      : {result['label']}")
+        print(f"Confidence : {result['confidence']}")
+        print(f"Scores     : {result['scores']}")
+        print(f"Model Used : {result['model']}")
+
+        if "error" in result:
+            print(f"Error      : {result['error']}")
