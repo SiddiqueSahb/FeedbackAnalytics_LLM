@@ -42,11 +42,7 @@ from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 from bertopic.representation import KeyBERTInspired
 from langdetect import detect, LangDetectException
 
-
-
-
 import json
-import spacy
 import argparse
 import numpy as np
 import pandas as pd
@@ -57,7 +53,6 @@ from logger import get_logger
 
 log = get_logger("discover_categories")
 representation_model = KeyBERTInspired()
-nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 
 #Fallback static categories (used if BERTopic fails)
 STATIC_FALLBACK: list[str] = [
@@ -79,11 +74,14 @@ def filter_english(texts: list[str]) -> list[str]:
     """
     keep = []
     for text in texts:
+        if len(text.split()) < 4:
+            keep.append(text)  # too short to detect reliably — keep
+            continue
         try:
             if detect(text) == "en":
                 keep.append(text)
         except LangDetectException:
-            continue # Skip reviews whose language cannot be detected
+            keep.append(text)  # detection failed — keep safe
 
     removed = len(texts) - len(keep)
     if removed:
@@ -136,44 +134,44 @@ def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
     return clean
 
 
+def _word_root(word: str) -> str:
+    #strip common suffixes to treat word forms as the same e.g. repair/repairs/repaired
+    w = word.lower().replace(" ", "")
+    for suffix in ("ing", "tion", "ed", "er", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[:-len(suffix)]
+    return w
 
 
-
-def clean_topic_label(keywords: list[tuple[str, float]]) -> str:
-
-    noise = {
-        "good", "bad", "great", "nice", "poor",
-        "product", "review", "item", "thing",
-        "star", "stars"
-    }
-
-    clean = []
-    seen = set()
-
-    for word, score in keywords:
-
-        word = word.replace("_", " ").strip()
-        word = word.lower().replace("_", " ").strip()
-
-        # Lemmatize each word
-        doc = nlp(word)
-
-        lemma = " ".join(token.lemma_ for token in doc).lower()
-
-        if lemma in noise:
-            continue
-
-        if lemma not in seen:
-            seen.add(lemma)
-            clean.append(word)
-
+def clean_topic_label(keywords: list[tuple[str,float]]) -> str:
+    # Remove stopwords using sklearn's built-in list — no hardcoded words needed
+    clean = [
+        word.replace("_", " ").strip()
+        for word, _ in keywords
+        if word.lower() not in ENGLISH_STOP_WORDS and len(word) > 2
+    ]
     if not clean:
-        clean = [word for word, _ in keywords[:4]]
+        clean = [word for word, _ in keywords[:4]]  # fallback: use raw keywords
 
-    return ", ".join(clean[:4]).title()
+    # Deduplicate — skip a word if its root is already seen
+    # OR if it is already contained inside an existing phrase (e.g. "Appointment" inside "Make Appointment")
+    seen_roots = set()
+    deduped    = []
+    for word in clean:
+        root    = _word_root(word)
+        w_lower = word.lower()
+        already_covered = (
+            root in seen_roots or
+            any(w_lower in e.lower() or e.lower() in w_lower for e in deduped)
+        )
+        if not already_covered:
+            seen_roots.add(root)
+            deduped.append(word)
+
+    return ",".join(deduped[:4]).title()
 
 
-def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 30):
+def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 30, embed_cache:str = "data/processed/embeddings_cache.npy"):
     """
     Run BERTopic on the provided texts.
     Returns:
@@ -188,6 +186,17 @@ def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 
     print(f"  Loading embedding model: {settings.EMBEDDING_MODEL}")
     #converting text to numbers
     embed_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+
+    # Load embeddings from cache if available — skips the 3+ minute embedding step
+    if os.path.exists(embed_cache):
+        print(f"  Loading cached embeddings from {embed_cache}")
+        embeddings = np.load(embed_cache)
+    else:
+        print(f"  Generating embeddings (first run only — will be cached)...")
+        embeddings = embed_model.encode(texts, show_progress_bar=True)
+        os.makedirs("data/processed", exist_ok=True)
+        np.save(embed_cache, embeddings)
+        print(f"  Embeddings saved to {embed_cache}")
 
     #UMAP: reduce 384-dim embeddings to 5-dim for clustering
     umap_model = UMAP(n_neighbors=15,n_components=5,min_dist=0.0,metric="cosine",random_state=42,low_memory=True,)
@@ -218,9 +227,7 @@ def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 
 )
 
     # Fit the BERTopic model, store the assigned topics, and ignore the returned probabilities.
-    topics, _ = topic_model.fit_transform(texts)
-    os.makedirs("models", exist_ok=True)
-    topic_model.save("models/bertopic_model")
+    topics, _ = topic_model.fit_transform(texts, embeddings)
 
     #extract topic info — Retrieve summary information for all discovered topics.
     topic_info_df = topic_model.get_topic_info()
@@ -260,17 +267,18 @@ def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 
 def main() ->  None:
     parser = argparse.ArgumentParser(description="Discover categories using BERTopic.")
 
-    parser.add_argument("--sample",type=int,default=None,help="Maximum reviews to sample (default: use all reviews)")  
-    parser.add_argument("--topics", type=int, default=None, help="Number of topics to discover (default: 15)")
+    parser.add_argument("--sample", type=int, default=None, help="Limit reviews to this number (default: use all)")
+    parser.add_argument("--topics", type=int, default=None, help="Number of topics to discover (default: auto)")
     parser.add_argument("--min-topic-size", type=int, default=None, help="Minimum reviews per topic (default: auto — 0.5%% of corpus)")
     parser.add_argument("--platform", type=str, default=None,choices=["amazon", "yelp", "twitter_airline"],help="Discover categories for one platform only (default: all)",)
-    parser.add_argument("--sentiment", type=str, default=None,choices=["negative", "positive", "neutral", "all"],help="Focus on a sentiment class (default: negative — most useful for complaints)",)
+    parser.add_argument("--sentiment", type=str, default="negative",choices=["negative", "positive", "neutral", "all"],help="Focus on a sentiment class (default: negative — most useful for complaints)",)
     args = parser.parse_args()
 
-    # Output paths — one file per sentiment so runs don't overwrite each other
-    sentiment_tag = args.sentiment
-    output_cats   = f"data/processed/complaint_categories_{sentiment_tag}.json"
-    output_info   = f"data/processed/bertopic_info_{sentiment_tag}.json"
+    # Output paths — one file per platform + sentiment so 9 runs don't overwrite each other
+    platform_tag  = args.platform or "all"
+    sentiment_tag = args.sentiment or "all"
+    output_cats   = f"data/processed/complaint_categories_{platform_tag}_{sentiment_tag}.json"
+    output_info   = f"data/processed/bertopic_info_{platform_tag}_{sentiment_tag}.json"
 
     print("  FeedbackIQ — Dynamic Category Discovery")
     print(f"  Sentiment : {sentiment_tag}")
@@ -289,7 +297,6 @@ def main() ->  None:
     print(f"  Platforms : {df['platform'].value_counts().to_dict()}")
     print(f"  Sentiments: {df['sentiment_label'].value_counts().to_dict()}")
 
-
     # Filter data based on platform and sentiment
     if args.platform:
         df = df[df["platform"] == args.platform]
@@ -302,14 +309,18 @@ def main() ->  None:
     if df.empty:
         print(f" No reviews after filtering. Try --sentiment all ")
         sys.exit(1)
-        
+
+    if args.sample and len(df) > args.sample:
+        df = df.sample(n=args.sample, random_state=42)
+        print(f"  Sampled to {len(df):,} reviews (--sample {args.sample})")
+    else:
+        print(f"  Using all {len(df):,} reviews (no sampling)")
 
     texts = df["cleaned_text"].fillna("").tolist()
-    # Remove non-English reviews
-    print(f" {len(texts):,} reviews ready before language filtering")
-    texts = filter_english(texts)
     print(f" {len(texts):,} reviews ready for BERTopic ")
 
+    # Dynamic improvement 1 — remove non-English reviews automatically
+    texts = filter_english(texts)
 
     if not texts:
         print("  No reviews remain after language filter.")
@@ -328,7 +339,8 @@ def main() ->  None:
     n_topics = args.topics if args.topics else "auto"
 
     try:
-        categories,topic_details = run_bertopic(texts,n_topics = n_topics,min_topic_size = min_size)
+        cache_path = f"data/processed/embeddings_cache_{platform_tag}_{sentiment_tag}.npy"
+        categories,topic_details = run_bertopic(texts,n_topics = n_topics,min_topic_size = min_size, embed_cache=cache_path)
     except ImportError as e:
         print(f"\n Missing package: {e}")
         print(f"   Run: pip install bertopic ")
@@ -354,19 +366,22 @@ def main() ->  None:
     # Dynamic improvement 3 — remove noise topics automatically
     topic_details = filter_noise_topics(topic_details)
 
+    # Remove star-rating meta topics — these are review artifacts, not real complaints
+    before = len(topic_details)
+    topic_details = [d for d in topic_details if "star" not in d["label"].lower()]
+    if len(topic_details) < before:
+        print(f"  Star filter: removed {before - len(topic_details)} rating-meta topic(s)")
+
     # Remove duplicate labels
-    seen = set()
-    unique_topic_details = []
-
+    seen:   set[str]  = set()
+    unique: list[str] = []
     for detail in topic_details:
-         if detail["label"] not in seen:
-            seen.add(detail["label"])
-            unique_topic_details.append(detail)
-
-    # Update topic_details
-    topic_details = unique_topic_details
-    # Create categories list from unique topics
-    categories = [detail["label"] for detail in topic_details]
+        cat = detail["label"]
+        if cat not in seen:
+            seen.add(cat)
+            unique.append(cat)
+    categories    = unique
+    topic_details = [d for d in topic_details if d["label"] in seen]
 
     # Show discovered categories
     print(f"  Found {len(categories)} categories:\n")
