@@ -54,6 +54,9 @@ from logger import get_logger
 log = get_logger("discover_categories")
 representation_model = KeyBERTInspired()
 
+import spacy
+nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+
 #Fallback static categories (used if BERTopic fails)
 STATIC_FALLBACK: list[str] = [
     "product quality",
@@ -107,35 +110,74 @@ def dynamic_min_topic_size(n_texts: int) -> int:
 
 def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
     """
-    Drops topics whose keywords appear across too many other topics.
-    Words in >50% of topics carry no discriminative signal — detected dynamically.
+    Three-stage dynamic noise filter — fully data-driven, no hardcoded word lists.
+
+    Stage 1 — Cross-topic noise:
+        Words appearing in >50% of all topics carry no discriminative signal.
+        e.g. if "product" appears in 30/40 topics → noise word.
+
+    Stage 2 — Keyword dominance:
+        If one word dominates ≥70% of a topic's OWN keywords, the topic is
+        degenerate — it's about that one word, not a real complaint cluster.
+        e.g. "star star, stars product, star rating, zero star" → "star" in 100%
+        e.g. "dont buy, buy recommend, buy cheap, buy used"    → "buy" in 70%
+
+    Stage 3 — Noun presence:
+        Topics with no nouns/proper nouns are pure sentiment expressions,
+        not real complaint categories. Detected via spaCy POS tagging.
+        e.g. "dont buy, don recommend, bother buying" → all verbs → dropped
     """
     if len(topic_details) < 3:
         return topic_details
 
-    # Detect noise words dynamically — no hardcoded list
+    # ── Stage 1: cross-topic noise words ──────────────────────────────────────
     word_count = Counter(kw.lower() for d in topic_details for kw in d["keywords"])
     noise = {w for w, c in word_count.items() if c >= len(topic_details) * 0.5}
-
     if noise:
         print(f"  Global noise words: {', '.join(sorted(noise)[:8])}")
 
-    clean = []
+    after_s1 = []
     for detail in topic_details:
-        kws = [kw.lower() for kw in detail["keywords"]]
+        kws         = [kw.lower() for kw in detail["keywords"]]
         noise_ratio = sum(1 for kw in kws if any(n in kw for n in noise)) / max(len(kws), 1)
         if noise_ratio >= 0.6:
-            print(f"  Dropped: '{detail['label']}' (noise {noise_ratio:.0%}, {detail['count']:,} reviews)")
+            print(f"  Dropped (cross-topic): '{detail['label']}' ({detail['count']:,} reviews)")
         else:
-            clean.append(detail)
+            after_s1.append(detail)
 
-    if len(clean) < len(topic_details):
-        print(f"  Noise filter: {len(topic_details) - len(clean)} removed, {len(clean)} remain")
-    return clean
+    # ── Stage 2: single-word dominance ────────────────────────────────────────
+    after_s2 = []
+    for detail in after_s1:
+        word_freq  = Counter(
+            w for kw in detail["keywords"]
+            for w in kw.lower().split() if len(w) > 2
+        )
+        top_word, top_count = word_freq.most_common(1)[0] if word_freq else ("", 0)
+        dominance = top_count / max(len(detail["keywords"]), 1)
+        if dominance >= 0.7:
+            print(f"  Dropped (word dominance): '{detail['label']}' — '{top_word}' in {top_count}/{len(detail['keywords'])} keywords")
+        else:
+            after_s2.append(detail)
+
+    # ── Stage 3: noun presence ─────────────────────────────────────────────────
+    result = []
+    for detail in after_s2:
+        all_text = " ".join(detail["keywords"][:5])
+        doc      = nlp(all_text)
+        has_noun = any(token.pos_ in {"NOUN", "PROPN"} for token in doc)
+        if not has_noun:
+            print(f"  Dropped (no nouns): '{detail['label']}' ({detail['count']:,} reviews)")
+        else:
+            result.append(detail)
+
+    removed = len(topic_details) - len(result)
+    if removed:
+        print(f"  Noise filter total: {removed} removed, {len(result)} remain")
+    return result
 
 
 def _word_root(word: str) -> str:
-    #strip common suffixes to treat word forms as the same e.g. repair/repairs/repaired
+    # Strip common suffixes to normalise word forms e.g. repair/repairs/repaired
     w = word.lower().replace(" ", "")
     for suffix in ("ing", "tion", "ed", "er", "es", "s"):
         if w.endswith(suffix) and len(w) - len(suffix) >= 3:
@@ -144,17 +186,40 @@ def _word_root(word: str) -> str:
 
 
 def clean_topic_label(keywords: list[tuple[str,float]]) -> str:
-    # Remove stopwords using sklearn's built-in list — no hardcoded words needed
-    clean = [
-        word.replace("_", " ").strip()
-        for word, _ in keywords
-        if word.lower() not in ENGLISH_STOP_WORDS and len(word) > 2
-    ]
+    """
+    Converts raw BERTopic keywords into a clean, readable category label.
+
+    Three rules applied in order:
+    1. Skip duplicate bigrams e.g. "color color", "star star" — vectorizer artifacts
+    2. Skip sklearn English stopwords — no signal
+    3. spaCy: only keep phrases containing a noun or proper noun — removes
+       pure verbs/adjectives like "dont", "buy", "recommend", "horrible"
+    Then deduplicate by word root to avoid Camera/Cameras, Charge/Charging.
+    """
+    clean = []
+    for word, _ in keywords:
+        word  = word.replace("_", " ").strip()
+        parts = word.lower().split()
+
+        # Rule 1 — duplicate bigrams e.g. "color color"
+        if len(parts) == 2 and parts[0] == parts[1]:
+            continue
+
+        # Rule 2 — stopwords
+        if word.lower() in ENGLISH_STOP_WORDS or len(word) <= 2:
+            continue
+
+        # Rule 3 — must contain at least one noun or proper noun
+        doc = nlp(word)
+        if not any(token.pos_ in {"NOUN", "PROPN"} for token in doc):
+            continue
+
+        clean.append(word)
+
     if not clean:
         clean = [word for word, _ in keywords[:4]]  # fallback: use raw keywords
 
-    # Deduplicate — skip a word if its root is already seen
-    # OR if it is already contained inside an existing phrase (e.g. "Appointment" inside "Make Appointment")
+    # Deduplicate — skip if root already seen or phrase already contained
     seen_roots = set()
     deduped    = []
     for word in clean:
@@ -168,7 +233,7 @@ def clean_topic_label(keywords: list[tuple[str,float]]) -> str:
             seen_roots.add(root)
             deduped.append(word)
 
-    return ",".join(deduped[:4]).title()
+    return ", ".join(deduped[:4]).title()
 
 
 def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 30, embed_cache:str = "data/processed/embeddings_cache.npy"):
@@ -365,12 +430,6 @@ def main() ->  None:
 
     # Dynamic improvement 3 — remove noise topics automatically
     topic_details = filter_noise_topics(topic_details)
-
-    # Remove star-rating meta topics — these are review artifacts, not real complaints
-    before = len(topic_details)
-    topic_details = [d for d in topic_details if "star" not in d["label"].lower()]
-    if len(topic_details) < before:
-        print(f"  Star filter: removed {before - len(topic_details)} rating-meta topic(s)")
 
     # Remove duplicate labels
     seen:   set[str]  = set()
