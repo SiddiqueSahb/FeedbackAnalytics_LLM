@@ -1,46 +1,63 @@
 """
-Dynamic Complaint Category Discovery using BERTopic.
-=====================================================
-Reads your real review data, groups similar complaints together
-automatically, and saves the discovered categories to a JSON file.
+Dynamic Complaint Category Discovery using BERTopic + cross-platform taxonomy merge.
+======================================================================================
+Reads real review data, groups similar complaints together automatically per
+platform, then MERGES near-duplicate topics across platforms into a single,
+consolidated business taxonomy before an LLM names the merged clusters.
 
-This replaces the hardcoded 7 static categories with categories that
-come directly from YOUR data — making the dissertation methodology
-data-driven rather than researcher-assumed.
+Why the merge stage exists (see docs/methodology_review.md for the full writeup):
+  BERTopic topics are a statistical artifact of clustering resolution, not a
+  business taxonomy. Converting each topic 1:1 into a category label produces
+  40-60 overlapping near-synonym categories (e.g. "Flight Boarding Delays" /
+  "Flight Schedule Failures" / "Flight Rescheduling Issues" are the same
+  complaint). Worse, discovering categories separately per platform and then
+  concatenating the raw per-platform files at inference time mixes
+  platform-irrelevant categories into every prediction (an airline category
+  showing up as a candidate for an Amazon electronics review).
 
-How it works (simple version):
-  1. Load reviews from reviews_unified.parquet
-  2. Sample up to --sample reviews (default 50,000) for speed
-  3. Filter non-English reviews automatically (langdetect)
-  4. BERTopic reads all text and groups similar complaints together
-  5. Top keywords per group become the category name
-  6. Noise topics removed automatically (rating-meta, too small)
-  7. Save discovered categories — one file per sentiment
+  This script fixes both problems:
+    1. Runs BERTopic per platform (as before) so platform-specific vocabulary
+       is captured well.
+    2. Computes a true topic centroid (mean of member document embeddings) for
+       every topic, in every platform.
+    3. Merges near-duplicate topics ACROSS ALL PLATFORMS via agglomerative
+       clustering on centroid cosine distance, down to a deliberate target
+       category count (--target-categories), instead of letting BERTopic's
+       nr_topics/min_topic_size hyperparameters implicitly decide the count.
+    4. Names each MERGED cluster with a single LLM call per cluster that is
+       given the list of category names already assigned so far, so it
+       cannot produce a near-synonym of an existing category. Each category
+       gets a name + one-sentence description + example phrases (used later
+       by categoriser.py as a much richer zero-shot hypothesis than a bare
+       3-word label).
+    5. Saves ONE consolidated taxonomy file used by categoriser.py, plus the
+       raw per-platform topic dumps for dissertation-appendix auditing.
 
 Usage:
-    python scripts/discover_categories.py
+    python scripts/discover_categories.py                       # full pipeline: discover -> merge -> name (all platforms, negative)
     python scripts/discover_categories.py --sentiment negative
-    python scripts/discover_categories.py --sentiment positive
-    python scripts/discover_categories.py --sentiment neutral
-    python scripts/discover_categories.py --sample 30000
-    python scripts/discover_categories.py --topics 15
-    python scripts/discover_categories.py --platform amazon
+    python scripts/discover_categories.py --target-categories 18
+    python scripts/discover_categories.py --platform amazon     # single-platform raw discovery only, no merge (audit/exploration mode)
+    python scripts/discover_categories.py --use-llm             # (single-platform mode) use LLM for raw per-topic labels instead of rule-based
 
-Outputs:
-    data/processed/complaint_categories_negative.json  <- loaded by categoriser.py
-    data/processed/complaint_categories_positive.json
-    data/processed/complaint_categories_neutral.json
-    data/processed/bertopic_info_<sentiment>.json      <- topic details for dissertation
+Outputs (multi-platform / default mode):
+    data/processed/complaint_categories_all_<sentiment>.json   <- consolidated taxonomy, loaded by categoriser.py
+    data/processed/taxonomy_merge_info_<sentiment>.json        <- merge diagnostics for dissertation (coherence, cluster membership)
+    data/processed/bertopic_info_<platform>_<sentiment>.json   <- raw per-platform topics (audit trail, one per platform)
 
 Author: Mohammad Asim | MSc Dissertation 2026
 """
 
-from __future__  import annotations
-import os,sys
+from __future__ import annotations
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 from bertopic.representation import KeyBERTInspired
-from langdetect import detect, LangDetectException
+from langdetect import detect, LangDetectException, DetectorFactory
+DetectorFactory.seed = 0  # langdetect's classifier is otherwise non-deterministic run-to-run,
+                          # which silently changes which reviews survive filter_english() and
+                          # invalidates any cached embeddings keyed on that filtered text count.
+from groq import Groq
 
 import json
 import argparse
@@ -57,7 +74,16 @@ representation_model = KeyBERTInspired()
 import spacy
 nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 
-#Fallback static categories (used if BERTopic fails)
+PLATFORMS = ["amazon", "yelp", "twitter_airline"]
+DEFAULT_TARGET_CATEGORIES = 24  # raised from 18: with the finer min_topic_size (now
+                                 # typically yielding 100+ raw topics vs ~54 before),
+                                 # merging that far down forced very unequal cluster
+                                 # sizes and produced an oversized catch-all category
+                                 # that dominated classification. Not a guaranteed fix —
+                                 # the real test is the gold-set evaluation, not this
+                                 # number alone.
+
+# Fallback static categories (used if BERTopic fails entirely)
 STATIC_FALLBACK: list[str] = [
     "product quality",
     "delivery and shipping",
@@ -69,22 +95,23 @@ STATIC_FALLBACK: list[str] = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 helpers — language filter, dynamic min topic size, noise filter
+# (unchanged in spirit from the original single-platform version)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def filter_english(texts: list[str]) -> list[str]:
-    """
-    Removes non-English reviews using langdetect — no hardcoded word lists.
-    Supports 55 languages automatically.
-    Short texts (<4 words) are kept as-is since they are too short to detect.
-    """
+    """Removes non-English reviews using langdetect. Short texts (<4 words) kept as-is."""
     keep = []
     for text in texts:
         if len(text.split()) < 4:
-            keep.append(text)  # too short to detect reliably — keep
+            keep.append(text)
             continue
         try:
             if detect(text) == "en":
                 keep.append(text)
         except LangDetectException:
-            keep.append(text)  # detection failed — keep safe
+            keep.append(text)
 
     removed = len(texts) - len(keep)
     if removed:
@@ -97,40 +124,34 @@ def filter_english(texts: list[str]) -> list[str]:
 
 def dynamic_min_topic_size(n_texts: int) -> int:
     """
-    Scale minimum topic size with corpus size.
-    Formula: 0.5% of corpus, capped between 50 and 500.
-    Examples:
-        10,000 reviews  ->  50  (lower cap)
-        50,000 reviews  -> 250
-       100,000 reviews  -> 500  (upper cap)
+    Scale minimum topic size with corpus size: 0.15% of corpus, capped 30-300.
+
+    Was 0.5% capped 50-500 — too coarse in practice: on a real ~58k-review
+    corpus it produced a min_cluster_size of 289, which caused HDBSCAN to
+    collapse everything into just 2 topics (observed on amazon/negative).
+    A smaller floor biases toward finer-grained topics, which the merge
+    stage (merge_topics) is specifically designed to consolidate afterward —
+    better to over-split here and merge deliberately than to under-split and
+    silently lose whole complaint types.
     """
-    size = int(n_texts * 0.005)  # 0.5% of corpus
-    return max(50, min(500, size))
+    size = int(n_texts * 0.0015)
+    return max(30, min(300, size))
 
 
 def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
     """
     Three-stage dynamic noise filter — fully data-driven, no hardcoded word lists.
 
-    Stage 1 — Cross-topic noise:
-        Words appearing in >50% of all topics carry no discriminative signal.
-        e.g. if "product" appears in 30/40 topics → noise word.
-
-    Stage 2 — Keyword dominance:
-        If one word dominates ≥70% of a topic's OWN keywords, the topic is
-        degenerate — it's about that one word, not a real complaint cluster.
-        e.g. "star star, stars product, star rating, zero star" → "star" in 100%
-        e.g. "dont buy, buy recommend, buy cheap, buy used"    → "buy" in 70%
-
-    Stage 3 — Noun presence:
-        Topics with no nouns/proper nouns are pure sentiment expressions,
-        not real complaint categories. Detected via spaCy POS tagging.
-        e.g. "dont buy, don recommend, bother buying" → all verbs → dropped
+    Stage 1 — Cross-topic noise: words appearing in >50% of all topics carry no
+              discriminative signal.
+    Stage 2 — Keyword dominance: if one word dominates >=70% of a topic's own
+              keywords, the topic is degenerate.
+    Stage 3 — Noun presence: topics with no nouns/proper nouns are pure
+              sentiment expressions, not complaint categories.
     """
     if len(topic_details) < 3:
         return topic_details
 
-    # ── Stage 1: cross-topic noise words ──────────────────────────────────────
     word_count = Counter(kw.lower() for d in topic_details for kw in d["keywords"])
     noise = {w for w, c in word_count.items() if c >= len(topic_details) * 0.5}
     if noise:
@@ -138,32 +159,39 @@ def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
 
     after_s1 = []
     for detail in topic_details:
-        kws         = [kw.lower() for kw in detail["keywords"]]
+        kws = [kw.lower() for kw in detail["keywords"]]
         noise_ratio = sum(1 for kw in kws if any(n in kw for n in noise)) / max(len(kws), 1)
         if noise_ratio >= 0.6:
             print(f"  Dropped (cross-topic): '{detail['label']}' ({detail['count']:,} reviews)")
         else:
             after_s1.append(detail)
 
-    # ── Stage 2: single-word dominance ────────────────────────────────────────
+    # Dominance alone is NOT a valid noise signal. With ngram_range=(1,2), a
+    # genuinely coherent, single-concept topic (e.g. "Flight Cancelled, Cancelled
+    # Flight, Flights Cancelled") will always show one word dominating its keyword
+    # list, because that word IS the topic — that's a feature, not degeneracy.
+    # This used to drop exactly these topics (flight cancellations, hold-time
+    # complaints, gate-agent complaints) purely for being monothematic. A
+    # dominant word is only a real degeneracy signal when it's ALSO a cross-topic
+    # noise word from Stage 1 (generic across the whole corpus, not just
+    # descriptive of this one topic).
     after_s2 = []
     for detail in after_s1:
-        word_freq  = Counter(
+        word_freq = Counter(
             w for kw in detail["keywords"]
             for w in kw.lower().split() if len(w) > 2
         )
         top_word, top_count = word_freq.most_common(1)[0] if word_freq else ("", 0)
         dominance = top_count / max(len(detail["keywords"]), 1)
-        if dominance >= 0.7:
-            print(f"  Dropped (word dominance): '{detail['label']}' — '{top_word}' in {top_count}/{len(detail['keywords'])} keywords")
+        if dominance >= 0.7 and top_word in noise:
+            print(f"  Dropped (word dominance + cross-topic noise): '{detail['label']}' — '{top_word}' in {top_count}/{len(detail['keywords'])} keywords")
         else:
             after_s2.append(detail)
 
-    # ── Stage 3: noun presence ─────────────────────────────────────────────────
     result = []
     for detail in after_s2:
         all_text = " ".join(detail["keywords"][:5])
-        doc      = nlp(all_text)
+        doc = nlp(all_text)
         has_noun = any(token.pos_ in {"NOUN", "PROPN"} for token in doc)
         if not has_noun:
             print(f"  Dropped (no nouns): '{detail['label']}' ({detail['count']:,} reviews)")
@@ -177,7 +205,6 @@ def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
 
 
 def _word_root(word: str) -> str:
-    # Strip common suffixes to normalise word forms e.g. repair/repairs/repaired
     w = word.lower().replace(" ", "")
     for suffix in ("ing", "tion", "ed", "er", "es", "s"):
         if w.endswith(suffix) and len(w) - len(suffix) >= 3:
@@ -185,45 +212,29 @@ def _word_root(word: str) -> str:
     return w
 
 
-def clean_topic_label(keywords: list[tuple[str,float]]) -> str:
-    """
-    Converts raw BERTopic keywords into a clean, readable category label.
-
-    Three rules applied in order:
-    1. Skip duplicate bigrams e.g. "color color", "star star" — vectorizer artifacts
-    2. Skip sklearn English stopwords — no signal
-    3. spaCy: only keep phrases containing a noun or proper noun — removes
-       pure verbs/adjectives like "dont", "buy", "recommend", "horrible"
-    Then deduplicate by word root to avoid Camera/Cameras, Charge/Charging.
-    """
+def clean_topic_label(keywords: list[tuple[str, float]]) -> str:
+    """Rule-based fallback: converts raw BERTopic keywords into a readable label."""
     clean = []
     for word, _ in keywords:
-        word  = word.replace("_", " ").strip()
+        word = word.replace("_", " ").strip()
         parts = word.lower().split()
 
-        # Rule 1 — duplicate bigrams e.g. "color color"
         if len(parts) == 2 and parts[0] == parts[1]:
             continue
-
-        # Rule 2 — stopwords
         if word.lower() in ENGLISH_STOP_WORDS or len(word) <= 2:
             continue
-
-        # Rule 3 — must contain at least one noun or proper noun
         doc = nlp(word)
         if not any(token.pos_ in {"NOUN", "PROPN"} for token in doc):
             continue
-
         clean.append(word)
 
     if not clean:
-        clean = [word for word, _ in keywords[:4]]  # fallback: use raw keywords
+        clean = [word for word, _ in keywords[:4]]
 
-    # Deduplicate — skip if root already seen or phrase already contained
     seen_roots = set()
-    deduped    = []
+    deduped = []
     for word in clean:
-        root    = _word_root(word)
+        root = _word_root(word)
         w_lower = word.lower()
         already_covered = (
             root in seen_roots or
@@ -236,12 +247,67 @@ def clean_topic_label(keywords: list[tuple[str,float]]) -> str:
     return ", ".join(deduped[:4]).title()
 
 
-def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 30, embed_cache:str = "data/processed/embeddings_cache.npy"):
+def llm_convert_to_category(keywords: list[tuple[str, float]]) -> str:
+    """Single-topic LLM naming — used only in single-platform audit mode (--platform)."""
+    keyword_str = ", ".join(word for word, _ in keywords[:10])
+
+    prompt = (
+        "You are an expert business analyst specialising in customer complaint analysis.\n\n"
+        f"Keywords extracted from similar customer reviews:\n{keyword_str}\n\n"
+        "Your task is to generate ONE general business complaint category.\n\n"
+        "Rules:\n"
+        "- Use 2 to 5 words.\n"
+        "- The category should represent the underlying complaint, not the product.\n"
+        "- Create a reusable business category that can classify many future customer reviews.\n"
+        "- Do not mention brand names or specific products.\n"
+        "- Use consistent names ending with 'Issues', 'Problems', 'Failures', or 'Delays' where appropriate.\n"
+        "- Return ONLY the category name.\n\n"
+        "Examples:\n"
+        "battery, charging, power, drain → Battery & Charging Issues\n"
+        "screen, cracked, display → Screen & Display Issues\n"
+        "wifi, router, internet → Network Connectivity Issues\n"
+        "late, package, shipping, courier → Delivery & Shipping Issues\n"
+        "refund, exchange, money back → Refund & Return Issues\n"
+        "staff, rude, support, response → Customer Service Issues\n"
+        "taste, flavour, stale, smell → Product Quality Issues\n"
+    )
+
+    if settings.GROQ_API_KEY:
+        try:
+            client = Groq(api_key=settings.GROQ_API_KEY)
+            response = client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=20,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"  [LLM] Groq error: {e} — falling back to rule-based")
+
+    print("  [LLM] No API key found — using rule-based label")
+    return clean_topic_label(keywords)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — BERTopic run per platform, now also returns topic centroids +
+# representative example documents (needed by the merge stage).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_bertopic(
+    texts: list[str],
+    n_topics: int | str = "auto",
+    min_topic_size: int = 30,
+    embed_cache: str = "data/processed/embeddings_cache.npy",
+    use_llm: bool = False,
+):
     """
     Run BERTopic on the provided texts.
+
     Returns:
-        categories  — list of discovered category label strings
-        topic_info  — list of dicts with topic details
+        categories    — list of discovered category label strings (rule-based or LLM, per-topic)
+        topic_details — list of dicts with: topic_id, label, keywords, count,
+                         centroid (list[float] — mean embedding of member docs),
+                         example_docs (list[str] — up to 3 texts closest to centroid)
     """
     from bertopic import BERTopic
     from sentence_transformers import SentenceTransformer
@@ -249,262 +315,594 @@ def run_bertopic(texts:list[str],n_topics:int|str = "auto",min_topic_size:int = 
     from hdbscan import HDBSCAN
 
     print(f"  Loading embedding model: {settings.EMBEDDING_MODEL}")
-    #converting text to numbers
     embed_model = SentenceTransformer(settings.EMBEDDING_MODEL)
 
-    # Load embeddings from cache if available — skips the 3+ minute embedding step
+    embeddings = None
     if os.path.exists(embed_cache):
-        print(f"  Loading cached embeddings from {embed_cache}")
-        embeddings = np.load(embed_cache)
-    else:
-        print(f"  Generating embeddings (first run only — will be cached)...")
+        cached = np.load(embed_cache)
+        if cached.shape[0] == len(texts):
+            print(f"  Loading cached embeddings from {embed_cache}")
+            embeddings = cached
+        else:
+            print(f"  Cached embeddings at {embed_cache} have {cached.shape[0]:,} rows but "
+                  f"{len(texts):,} texts are being encoded now — cache is stale "
+                  f"(likely upstream data/filtering changed since it was built). Regenerating.")
+
+    if embeddings is None:
+        print(f"  Generating embeddings (will be cached)...")
         embeddings = embed_model.encode(texts, show_progress_bar=True)
         os.makedirs("data/processed", exist_ok=True)
         np.save(embed_cache, embeddings)
         print(f"  Embeddings saved to {embed_cache}")
 
-    #UMAP: reduce 384-dim embeddings to 5-dim for clustering
-    umap_model = UMAP(n_neighbors=15,n_components=5,min_dist=0.0,metric="cosine",random_state=42,low_memory=True,)
-
-    #HDBSCAN: cluster the reduced embeddings
-    hdbscan_model = HDBSCAN(min_cluster_size=min_topic_size,min_samples=10,metric="euclidean",cluster_selection_method="eom",prediction_data=True,)
-
-    # Vectorizer for extracting topic words
-    vectorizer_model = CountVectorizer(
-        stop_words="english",   # Remove common English stop words
-        ngram_range=(1, 2),     # Use single words and two-word phrases
-        min_df=5,               # Ignore words appearing in fewer than 5 reviews
-        max_df=0.90,            # Ignore words appearing in more than 90% of reviews
-    )
+    umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric="cosine", random_state=42, low_memory=True)
+    hdbscan_model = HDBSCAN(min_cluster_size=min_topic_size, min_samples=10, metric="euclidean", cluster_selection_method="eom", prediction_data=True)
+    # NOTE: this vectorizer fits on topic-level aggregated text (one pseudo-document
+    # per topic), not individual reviews — min_df/max_df here constrain how many
+    # TOPICS a word must appear across, not how many reviews. With nr_topics="auto",
+    # BERTopic's internal reduction step can shrink the topic count low enough that
+    # a strict min_df=5 makes max_df*topic_count < min_df, crashing sklearn
+    # ("max_df corresponds to < documents than min_df"). min_df=1/max_df=1.0 removes
+    # that failure mode entirely; c-TF-IDF's IDF weighting already downweights
+    # near-universal terms, so little filtering quality is lost.
+    vectorizer_model = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=1, max_df=1.0)
 
     print(f"Creating BERTopic model with {n_topics} topics")
-    # Create and configure the BERTopic model.
     topic_model = BERTopic(
-    representation_model = representation_model,
-    embedding_model=embed_model, # SentenceTransformer used to generate semantic embeddings.
-    umap_model=umap_model,  # UMAP model used for dimensionality reduction.
-    hdbscan_model=hdbscan_model, # HDBSCAN model used for document clustering
-    vectorizer_model=vectorizer_model, # CountVectorizer model used for feature extraction.
-    nr_topics=n_topics, # Target number of topics after automatic topic reduction.
-    top_n_words=10, # Number of representative words displayed for each topic.
-    verbose=True, # Display training progress in the console.
-    calculate_probabilities=False,# Disable probability computation to improve processing speed
-)
+        representation_model=representation_model,
+        embedding_model=embed_model,
+        umap_model=umap_model,
+        hdbscan_model=hdbscan_model,
+        vectorizer_model=vectorizer_model,
+        nr_topics=n_topics,
+        top_n_words=10,
+        verbose=True,
+        calculate_probabilities=False,
+    )
 
-    # Fit the BERTopic model, store the assigned topics, and ignore the returned probabilities.
     topics, _ = topic_model.fit_transform(texts, embeddings)
+    topics = np.array(topics)
 
-    #extract topic info — Retrieve summary information for all discovered topics.
     topic_info_df = topic_model.get_topic_info()
     print(f"Total topics (including outlier): {len(topic_info_df)}")
     print(f"Actual topics: {len(topic_info_df[topic_info_df['Topic'] != -1])}")
 
-    #to store categories and topic details
-    categories:list[str] = []
-    topic_details:list[dict] = []
+    n_outliers = int((topics == -1).sum())
+    print(f"Outlier (unclustered, topic=-1) documents: {n_outliers:,} / {len(texts):,} "
+          f"({n_outliers / max(len(texts), 1) * 100:.1f}%)")
+    if len(topic_info_df[topic_info_df['Topic'] != -1]) <= 3:
+        print(f"  WARNING: only {len(topic_info_df[topic_info_df['Topic'] != -1])} topics found — "
+              f"HDBSCAN likely collapsed the corpus into too few clusters at "
+              f"min_topic_size={min_topic_size}. Consider a smaller --min-topic-size.")
 
-    # Iterate through each topic in the topic information DataFrame. (index,row in topic_info_df)
-    for _,row in topic_info_df.iterrows():
+    categories: list[str] = []
+    topic_details: list[dict] = []
+
+    for _, row in topic_info_df.iterrows():
         topic_id = int(row["Topic"])
         if topic_id == -1:
             continue
 
-        top_words_raw = topic_model.get_topic(topic_id) #output - (keyword, importance_score)
-
+        top_words_raw = topic_model.get_topic(topic_id)
         if not top_words_raw:
             continue
 
-        # top_words_raw = [('battery', 0.09), ('charge', 0.08), ...]
-        label = clean_topic_label(top_words_raw) #sending keywords to clean_topic_label function
+        if use_llm:
+            label = llm_convert_to_category(top_words_raw)
+            print(f"  [LLM] {[w for w, _ in top_words_raw[:5]]} → '{label}'")
+        else:
+            label = clean_topic_label(top_words_raw)
+
         keywords = [word for word, _ in top_words_raw[:10]]
-        count    = int(row.get("Count", 0))
+        count = int(row.get("Count", 0))
+
+        # Topic centroid — true mean of member document embeddings, not a
+        # keyword-string embedding. This is what the merge stage clusters on.
+        member_idx = np.where(topics == topic_id)[0]
+        if len(member_idx) > 0:
+            centroid = embeddings[member_idx].mean(axis=0)
+            # Representative example docs — the 3 member texts closest to the centroid
+            member_vecs = embeddings[member_idx]
+            sims = member_vecs @ centroid / (
+                np.linalg.norm(member_vecs, axis=1) * np.linalg.norm(centroid) + 1e-9
+            )
+            top_local = np.argsort(-sims)[:3]
+            example_docs = [texts[member_idx[i]] for i in top_local]
+        else:
+            centroid = np.zeros(embeddings.shape[1])
+            example_docs = []
 
         categories.append(label)
         topic_details.append({
-            "topic_id":  topic_id,
-            "label":     label,
-            "keywords":  keywords,
-            "count":     count,
+            "topic_id": topic_id,
+            "label": label,
+            "keywords": keywords,
+            "count": count,
+            "centroid": centroid.tolist(),
+            "example_docs": example_docs,
         })
+
     return categories, topic_details
 
 
-def main() ->  None:
-    parser = argparse.ArgumentParser(description="Discover categories using BERTopic.")
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — cross-platform merge: cluster topic centroids down to a target
+# number of business categories.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    parser.add_argument("--sample", type=int, default=None, help="Limit reviews to this number (default: use all)")
-    parser.add_argument("--topics", type=int, default=None, help="Number of topics to discover (default: auto)")
-    parser.add_argument("--min-topic-size", type=int, default=None, help="Minimum reviews per topic (default: auto — 0.5%% of corpus)")
-    parser.add_argument("--platform", type=str, default=None,choices=["amazon", "yelp", "twitter_airline"],help="Discover categories for one platform only (default: all)",)
-    parser.add_argument("--sentiment", type=str, default="negative",choices=["negative", "positive", "neutral", "all"],help="Focus on a sentiment class (default: negative — most useful for complaints)",)
-    args = parser.parse_args()
+def merge_topics(all_topics: list[dict], target_categories: int) -> list[dict]:
+    """
+    Merge near-duplicate topics (possibly from different platforms) into a
+    target number of business-category clusters, using agglomerative
+    clustering on topic-centroid cosine distance.
 
-    # Output paths — one file per platform + sentiment so 9 runs don't overwrite each other
-    platform_tag  = args.platform or "all"
-    sentiment_tag = args.sentiment or "all"
-    output_cats   = f"data/processed/complaint_categories_{platform_tag}_{sentiment_tag}.json"
-    output_info   = f"data/processed/bertopic_info_{platform_tag}_{sentiment_tag}.json"
+    Each raw topic in `all_topics` must have: keywords, count, centroid,
+    example_docs, label (original per-topic label, kept for audit), platform.
 
-    print("  FeedbackIQ — Dynamic Category Discovery")
-    print(f"  Sentiment : {sentiment_tag}")
-    print(f"  Output    : {output_cats}")
+    Returns a list of merged-cluster dicts:
+        {
+          "keywords":        top keywords across all member topics, ranked by
+                              cross-topic frequency then original rank,
+          "example_docs":     up to 6 representative example reviews,
+          "count":            summed review count across member topics,
+          "platforms":        sorted list of platforms this cluster draws from,
+          "source_labels":    original per-topic labels (audit trail),
+          "source_topic_ids": list of (platform, topic_id) pairs,
+          "centroid":         mean of member centroids,
+        }
+    """
+    from sklearn.cluster import AgglomerativeClustering
 
-    #check if data exists
-    if not os.path.exists(settings.DATA_PATH):
-        print(f"\n Data not found at {settings.DATA_PATH}")
-        print(f"Run first: python scripts/preprocess.py ")
+    n = len(all_topics)
+    if n == 0:
+        return []
+    if n <= target_categories:
+        print(f"  {n} raw topics <= target {target_categories} — no merging needed, treating each as its own category")
+        cluster_labels = list(range(n))
+    else:
+        X = np.stack([np.array(t["centroid"]) for t in all_topics])
+        clustering = AgglomerativeClustering(
+            n_clusters=target_categories, metric="cosine", linkage="average"
+        )
+        cluster_labels = clustering.fit_predict(X)
+        print(f"  Merged {n} raw topics → {target_categories} clusters (agglomerative, cosine, average linkage)")
+
+    clusters: dict[int, list[dict]] = {}
+    for topic, cl in zip(all_topics, cluster_labels):
+        clusters.setdefault(int(cl), []).append(topic)
+
+    merged: list[dict] = []
+    for cl_id, members in clusters.items():
+        kw_counter: Counter = Counter()
+        for m in members:
+            for rank, kw in enumerate(m["keywords"]):
+                kw_counter[kw.lower()] += (len(m["keywords"]) - rank) * (m["count"] or 1)
+        top_keywords = [kw for kw, _ in kw_counter.most_common(12)]
+
+        example_docs: list[str] = []
+        for m in sorted(members, key=lambda x: -x["count"]):
+            for doc in m["example_docs"]:
+                if doc not in example_docs:
+                    example_docs.append(doc)
+            if len(example_docs) >= 6:
+                break
+        example_docs = example_docs[:6]
+
+        centroids = np.stack([np.array(m["centroid"]) for m in members])
+        merged_centroid = centroids.mean(axis=0)
+
+        merged.append({
+            "keywords": top_keywords,
+            "example_docs": example_docs,
+            "count": sum(m["count"] for m in members),
+            "platforms": sorted({m["platform"] for m in members}),
+            "source_labels": [m["label"] for m in members],
+            "source_topic_ids": [{"platform": m["platform"], "topic_id": m["topic_id"]} for m in members],
+            "centroid": merged_centroid.tolist(),
+        })
+
+    # Largest (most-evidenced) clusters first — named first so the LLM's
+    # "already used" list is seeded by the most important categories.
+    merged.sort(key=lambda c: -c["count"])
+    return merged
+
+
+def taxonomy_coherence(merged: list[dict]) -> float:
+    """
+    Mean pairwise cosine similarity between merged-category centroids.
+    Lower = better separated categories (report this to justify
+    --target-categories in the dissertation methodology chapter).
+    """
+    if len(merged) < 2:
+        return 0.0
+    X = np.stack([np.array(c["centroid"]) for c in merged])
+    X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+    sims = X @ X.T
+    n = len(merged)
+    upper = sims[np.triu_indices(n, k=1)]
+    return float(upper.mean())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 4 — name each merged cluster with a context-aware LLM call.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def llm_name_merged_cluster(
+    keywords: list[str],
+    example_docs: list[str],
+    existing_names: list[str],
+) -> dict:
+    """
+    Names ONE merged cluster. Critically, this call is given the list of
+    category names already assigned to previous (larger) clusters, so it can
+    avoid producing a near-synonym — this is what prevents the "Travel
+    Experience Failures" / "Travel Experience Issues" / "Travel Disruption
+    Issues" duplication seen in the original per-topic-isolated naming.
+
+    Returns {"name": str, "description": str, "exemplars": [str, ...]}
+    """
+    keyword_str = ", ".join(keywords[:12])
+    examples_str = "\n".join(f"  - \"{d[:160]}\"" for d in example_docs[:4])
+    existing_str = "\n".join(f"  - {n}" for n in existing_names) or "  (none yet)"
+
+    prompt = (
+        "You are an expert business analyst building a customer-complaint taxonomy.\n\n"
+        f"Keywords from a cluster of similar customer complaints:\n{keyword_str}\n\n"
+        f"Example reviews from this cluster:\n{examples_str}\n\n"
+        f"Category names ALREADY used for other clusters (do NOT duplicate or\n"
+        f"produce a close synonym of any of these — if this cluster is the same\n"
+        f"underlying complaint as one of these, reuse that exact name instead):\n{existing_str}\n\n"
+        "Respond with ONLY a JSON object, no other text, in this exact shape:\n"
+        '{"name": "2-5 word category name ending in Issues/Problems/Failures/Delays where natural", '
+        '"description": "one sentence describing the underlying complaint, written as a general '
+        'statement usable to classify future unseen reviews, no brand or product names", '
+        '"exemplars": ["short phrase 1", "short phrase 2", "short phrase 3"]}\n\n'
+        "Example:\n"
+        '{"name": "Battery & Charging Issues", "description": "The product fails to charge, '
+        'does not hold a charge, or the battery degrades quickly after purchase.", '
+        '"exemplars": ["battery drains fast", "won\'t charge", "stopped holding a charge"]}'
+    )
+
+    if settings.GROQ_API_KEY:
+        try:
+            client = Groq(api_key=settings.GROQ_API_KEY)
+            response = client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=settings.LLM_TEMPERATURE,
+            )
+            raw = response.choices[0].message.content.strip()
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+            start, end = raw.find("{"), raw.rfind("}")
+            parsed = json.loads(raw[start:end + 1])
+            name = str(parsed["name"]).strip()
+            description = str(parsed.get("description", name)).strip()
+            exemplars = [str(e).strip() for e in parsed.get("exemplars", [])][:5]
+            if name and not any(name.lower() == e.lower() for e in existing_names):
+                return {"name": name, "description": description, "exemplars": exemplars}
+            print(f"  [LLM] Duplicate or empty name '{name}' — falling back to rule-based")
+        except Exception as e:
+            print(f"  [LLM] Groq error naming merged cluster: {e} — falling back to rule-based")
+
+    # Fallback: rule-based label + auto description from keywords
+    label = clean_topic_label([(kw, 1.0) for kw in keywords])
+    if not label or any(label.lower() == e.lower() for e in existing_names):
+        label = f"{label} (Cluster {len(existing_names) + 1})" if label else f"Unnamed Cluster {len(existing_names) + 1}"
+    description = f"Complaints related to: {', '.join(keywords[:6])}."
+    return {"name": label, "description": description, "exemplars": keywords[:3]}
+
+
+def name_all_clusters(merged: list[dict]) -> list[dict]:
+    """Names every merged cluster sequentially, feeding forward already-used names."""
+    named: list[dict] = []
+    existing_names: list[str] = []
+
+    for i, cluster in enumerate(merged, start=1):
+        print(f"  Naming cluster {i}/{len(merged)}  ({cluster['count']:,} reviews, "
+              f"platforms: {', '.join(cluster['platforms'])})")
+        result = llm_name_merged_cluster(cluster["keywords"], cluster["example_docs"], existing_names)
+        existing_names.append(result["name"])
+        print(f"    → '{result['name']}'")
+
+        named.append({
+            "category": result["name"],
+            "description": result["description"],
+            "exemplars": result["exemplars"],
+            "keywords": cluster["keywords"][:10],
+            "platforms": cluster["platforms"],
+            "count": cluster["count"],
+            "source_labels": cluster["source_labels"],
+            "source_topic_ids": cluster["source_topic_ids"],
+        })
+
+    # Safety-net dedup: exact (case-insensitive) name collisions get merged,
+    # in case the LLM ever ignores the "existing names" instruction.
+    seen: dict[str, dict] = {}
+    for cat in named:
+        key = cat["category"].strip().lower()
+        if key in seen:
+            existing = seen[key]
+            existing["count"] += cat["count"]
+            existing["keywords"] = list(dict.fromkeys(existing["keywords"] + cat["keywords"]))[:10]
+            existing["platforms"] = sorted(set(existing["platforms"]) | set(cat["platforms"]))
+            existing["exemplars"] = list(dict.fromkeys(existing["exemplars"] + cat["exemplars"]))[:5]
+        else:
+            seen[key] = cat
+    return list(seen.values())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def discover_platform_topics(df: pd.DataFrame, platform: str, sentiment_tag: str, args) -> list[dict]:
+    """Runs the single-platform BERTopic discovery pipeline and returns raw topic dicts
+    tagged with platform (each dict includes 'centroid' and 'example_docs')."""
+    pdf = df[df["platform"] == platform]
+    if pdf.empty:
+        print(f"  No reviews for platform '{platform}' — skipping")
+        return []
+
+    print(f"\n{'=' * 60}\n  Platform: {platform}  ({len(pdf):,} reviews)\n{'=' * 60}")
+    texts = pdf["cleaned_text"].fillna("").tolist()
+    texts = filter_english(texts)
+    if not texts:
+        print(f"  No reviews remain after language filter for '{platform}'.")
+        return []
+
+    if args.min_topic_size:
+        min_size = args.min_topic_size
+    else:
+        min_size = dynamic_min_topic_size(len(texts))
+
+    n_topics = args.topics if args.topics else "auto"
+    cache_path = f"data/processed/embeddings_cache_{platform}_{sentiment_tag}.npy"
+
+    # Auto-retry with a shrinking min_topic_size if HDBSCAN collapses the corpus
+    # into too few topics (observed on real data: 289 collapsed 57,931 amazon
+    # reviews into just 2 topics). Retrying is cheap — embeddings are cached, so
+    # only UMAP+HDBSCAN reruns, not re-encoding. This removes the need to
+    # manually diagnose and rerun with a smaller --min-topic-size by hand.
+    MIN_TOPIC_FLOOR = 15
+    MIN_RAW_TOPICS_ACCEPTABLE = 5
+    attempt = 0
+    topic_details = []
+    while True:
+        attempt += 1
+        print(f"  min_topic_size: {min_size}  (attempt {attempt})")
+        try:
+            _, topic_details = run_bertopic(
+                texts, n_topics=n_topics, min_topic_size=min_size,
+                embed_cache=cache_path, use_llm=False,  # rule-based per-topic label; LLM only used at merge-naming stage
+            )
+        except Exception as e:
+            print(f"  BERTopic failed for '{platform}': {e}")
+            log.error("BERTopic failed for %s: %s", platform, e, exc_info=True)
+            return []
+
+        if len(topic_details) >= MIN_RAW_TOPICS_ACCEPTABLE or min_size <= MIN_TOPIC_FLOOR:
+            if len(topic_details) < MIN_RAW_TOPICS_ACCEPTABLE:
+                print(f"  WARNING: only {len(topic_details)} topics even at the min_topic_size floor "
+                      f"({MIN_TOPIC_FLOOR}) — accepting as-is. Consider --sample or manual review.")
+            break
+
+        new_min_size = max(MIN_TOPIC_FLOOR, min_size // 2)
+        print(f"  Only {len(topic_details)} topics found (< {MIN_RAW_TOPICS_ACCEPTABLE}) — "
+              f"retrying with min_topic_size={new_min_size} instead of {min_size}")
+        min_size = new_min_size
+
+    topic_details = filter_noise_topics(topic_details)
+    for d in topic_details:
+        d["platform"] = platform
+
+    # Save raw per-platform dump for dissertation audit trail
+    info_path = f"data/processed/bertopic_info_{platform}_{sentiment_tag}.json"
+    os.makedirs("data/processed", exist_ok=True)
+    with open(info_path, "w") as f:
+        json.dump({
+            "platform": platform, "sentiment": sentiment_tag,
+            "sample_size": len(texts), "min_topic_size": min_size,
+            "n_topics": len(topic_details),
+            "topics": [{k: v for k, v in d.items() if k != "centroid"} for d in topic_details],  # omit raw vectors from the human-readable audit file
+        }, f, indent=2)
+    print(f"  Raw topics saved → {info_path}")
+
+    return topic_details
+
+
+def run_multi_platform_pipeline(df: pd.DataFrame, sentiment_tag: str, args) -> None:
+    """Full pipeline: discover per platform -> merge across platforms -> name merged clusters -> save consolidated taxonomy."""
+    all_topics: list[dict] = []
+    for platform in PLATFORMS:
+        all_topics.extend(discover_platform_topics(df, platform, sentiment_tag, args))
+
+    if not all_topics:
+        print("\n  No topics discovered on any platform — saving static fallback.")
+        categories = [{"category": c.title(), "description": c, "exemplars": [], "keywords": c.split(),
+                        "platforms": PLATFORMS, "count": 0, "source_labels": [c], "source_topic_ids": []}
+                       for c in STATIC_FALLBACK]
+        coherence = 0.0
+    else:
+        print(f"\n{'=' * 60}\n  Merging {len(all_topics)} raw topics across {len(PLATFORMS)} platforms\n{'=' * 60}")
+        target = args.target_categories or DEFAULT_TARGET_CATEGORIES
+        merged = merge_topics(all_topics, target_categories=target)
+        coherence = taxonomy_coherence(merged)
+        print(f"  Taxonomy coherence (mean pairwise centroid cosine similarity): {coherence:.4f}  (lower = better separated)")
+
+        print(f"\n{'=' * 60}\n  Naming {len(merged)} merged clusters (context-aware, sequential)\n{'=' * 60}")
+        categories = name_all_clusters(merged)
+
+    print(f"\n  Final consolidated taxonomy: {len(categories)} categories\n")
+    for i, cat in enumerate(categories, start=1):
+        print(f"{i:2d}. {cat['category']}  ({cat['count']:,} reviews, platforms: {', '.join(cat['platforms'])})")
+        print(f"     {cat['description']}")
+
+    output_cats = f"data/processed/complaint_categories_all_{sentiment_tag}.json"
+    output_info = f"data/processed/taxonomy_merge_info_{sentiment_tag}.json"
+    os.makedirs("data/processed", exist_ok=True)
+
+    with open(output_cats, "w") as f:
+        json.dump(categories, f, indent=2)
+    print(f"\n  Consolidated taxonomy saved → {output_cats}")
+
+    with open(output_info, "w") as f:
+        json.dump({
+            "sentiment": sentiment_tag,
+            "n_raw_topics": len(all_topics),
+            "n_categories": len(categories),
+            "target_categories": args.target_categories or DEFAULT_TARGET_CATEGORIES,
+            "coherence_mean_pairwise_cosine_sim": coherence,
+            "categories": categories,
+        }, f, indent=2)
+    print(f"  Merge diagnostics saved → {output_info}")
+
+    _run_classification_smoke_test(sentiment_tag)
+
+
+TEST_REVIEWS = [
+    "The battery stopped charging after one week.",
+    "My package arrived damaged and three weeks late.",
+    "The staff were rude and refused to help me.",
+    "Food was cold and tasteless, never coming back.",
+    "Flight was cancelled with no explanation given.",
+]
+
+
+def _run_classification_smoke_test(sentiment_tag: str) -> None:
+    """
+    Immediately loads the taxonomy just written and classifies a fixed set of
+    test reviews with it, in the SAME process/run — so one command shows both
+    the discovered taxonomy AND whether classification looks right, instead of
+    needing a separate `python nlp/categoriser.py` run and a second round-trip.
+    """
+    print(f"\n{'=' * 60}")
+    print(f"  Smoke-testing the new taxonomy against fixed test reviews")
+    print(f"{'=' * 60}")
+    try:
+        import nlp.categoriser as categoriser
+        categoriser.reload_categories(sentiment_tag)
+        for review in TEST_REVIEWS:
+            result = categoriser.categorise(review)
+            top = result[0] if result else None
+            print(f"\n  Review: {review}")
+            if top:
+                print(f"  -> {top['category']}  (score={top['score']})")
+                if len(result) > 1:
+                    print(f"     runner-up: {result[1]['category']} (score={result[1]['score']})")
+            else:
+                print("  -> no prediction returned")
+    except Exception as e:
+        print(f"  Smoke test could not run: {e}")
+        print(f"  (Run `python nlp/categoriser.py` manually to check classification.)")
+        log.error("Classification smoke test failed: %s", e, exc_info=True)
+
+
+def run_single_platform_audit(df: pd.DataFrame, platform: str, sentiment_tag: str, args) -> None:
+    """Legacy single-platform mode: raw discovery only, no merge. Useful for
+    exploring one platform's topics in isolation (dissertation appendix /
+    debugging), NOT used to produce the taxonomy categoriser.py loads."""
+    pdf = df[df["platform"] == platform]
+    print(f"  Filtered to platform '{platform}': {len(pdf):,} reviews")
+    if pdf.empty:
+        print(" No reviews after filtering.")
         sys.exit(1)
 
-    # load data
+    if args.sample and len(pdf) > args.sample:
+        pdf = pdf.sample(n=args.sample, random_state=42)
+        print(f"  Sampled to {len(pdf):,} reviews (--sample {args.sample})")
+
+    texts = pdf["cleaned_text"].fillna("").tolist()
+    texts = filter_english(texts)
+    if not texts:
+        print("  No reviews remain after language filter.")
+        sys.exit(1)
+
+    min_size = args.min_topic_size or dynamic_min_topic_size(len(texts))
+    n_topics = args.topics if args.topics else "auto"
+    cache_path = f"data/processed/embeddings_cache_{platform}_{sentiment_tag}.npy"
+
+    categories, topic_details = run_bertopic(
+        texts, n_topics=n_topics, min_topic_size=min_size,
+        embed_cache=cache_path, use_llm=args.use_llm,
+    )
+    topic_details = filter_noise_topics(topic_details)
+
+    seen, unique = set(), []
+    for d in topic_details:
+        if d["label"] not in seen:
+            seen.add(d["label"])
+            unique.append(d["label"])
+    categories = unique
+
+    print(f"\n  [AUDIT MODE — single platform, NOT merged, NOT used by categoriser.py]")
+    print(f"  Found {len(categories)} raw topics for '{platform}':\n")
+    for i, cat in enumerate(categories, start=1):
+        print(f"  {i}. {cat}")
+
+    output_cats = f"data/processed/complaint_categories_{platform}_{sentiment_tag}.json"
+    output_info = f"data/processed/bertopic_info_{platform}_{sentiment_tag}.json"
+    os.makedirs("data/processed", exist_ok=True)
+    with open(output_cats, "w") as f:
+        json.dump(categories, f, indent=2)
+    with open(output_info, "w") as f:
+        json.dump({
+            "n_categories": len(categories), "sample_size": len(texts), "platform": platform,
+            "sentiment": sentiment_tag, "min_topic_size": min_size, "categories": categories,
+            "topic_details": [{k: v for k, v in d.items() if k != "centroid"} for d in topic_details],
+        }, f, indent=2)
+    print(f"\n  Raw audit files saved → {output_cats}, {output_info}")
+    print(f"  NOTE: run WITHOUT --platform to build the merged taxonomy categoriser.py uses.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Discover complaint categories using BERTopic + cross-platform taxonomy merge.")
+    parser.add_argument("--sample", type=int, default=None, help="Limit reviews per platform (single-platform audit mode only)")
+    parser.add_argument("--topics", type=int, default=None, help="Number of raw BERTopic topics per platform (default: auto)")
+    parser.add_argument("--min-topic-size", type=int, default=None, help="Minimum reviews per raw topic (default: auto — 0.5%% of corpus)")
+    parser.add_argument("--target-categories", type=int, default=None, help=f"Final number of merged business categories (default: {DEFAULT_TARGET_CATEGORIES})")
+    parser.add_argument("--platform", type=str, default=None, choices=PLATFORMS, help="AUDIT MODE: discover raw topics for one platform only, no merge (not used by categoriser.py)")
+    parser.add_argument("--sentiment", type=str, default="negative", choices=["negative", "positive", "neutral"], help="Sentiment class to build a taxonomy for (default: negative)")
+    parser.add_argument("--use-llm", action="store_true", help="AUDIT MODE only: use LLM for raw per-topic labels instead of rule-based")
+    args = parser.parse_args()
+
+    sentiment_tag = args.sentiment
+    print("  FeedbackIQ — Category Discovery")
+    print(f"  Sentiment : {sentiment_tag}")
+    print(f"  Mode      : {'single-platform audit (' + args.platform + ')' if args.platform else 'multi-platform merge (recommended)'}")
+
+    if not os.path.exists(settings.DATA_PATH):
+        print(f"\n Data not found at {settings.DATA_PATH}")
+        print(f"Run first: python scripts/preprocess.py")
+        sys.exit(1)
+
     print(f"Loading data from {settings.DATA_PATH}")
     df = pd.read_parquet(settings.DATA_PATH)
     print(f"  Loaded {len(df):,} reviews from {settings.DATA_PATH}")
     print(f"  Platforms : {df['platform'].value_counts().to_dict()}")
     print(f"  Sentiments: {df['sentiment_label'].value_counts().to_dict()}")
 
-    # Filter data based on platform and sentiment
-    if args.platform:
-        df = df[df["platform"] == args.platform]
-        print(f"  Filtered to platform '{args.platform}': {len(df):,} reviews")
-
-    if args.sentiment != "all":
-        df = df[df["sentiment_label"] == args.sentiment]
-        print(f"  Filtered to '{args.sentiment}' sentiment: {len(df):,} reviews")
-
+    df = df[df["sentiment_label"] == sentiment_tag]
+    print(f"  Filtered to '{sentiment_tag}' sentiment: {len(df):,} reviews")
     if df.empty:
-        print(f" No reviews after filtering. Try --sentiment all ")
+        print(" No reviews after filtering.")
         sys.exit(1)
-
-    if args.sample and len(df) > args.sample:
-        df = df.sample(n=args.sample, random_state=42)
-        print(f"  Sampled to {len(df):,} reviews (--sample {args.sample})")
-    else:
-        print(f"  Using all {len(df):,} reviews (no sampling)")
-
-    texts = df["cleaned_text"].fillna("").tolist()
-    print(f" {len(texts):,} reviews ready for BERTopic ")
-
-    # Dynamic improvement 1 — remove non-English reviews automatically
-    texts = filter_english(texts)
-
-    if not texts:
-        print("  No reviews remain after language filter.")
-        sys.exit(1)
-
-    # Dynamic improvement 2 — scale min_topic_size to corpus size automatically
-    if args.min_topic_size:
-        min_size = args.min_topic_size
-        print(f"  min_topic_size: {min_size} (user-specified)")
-    else:
-        min_size = dynamic_min_topic_size(len(texts))
-        print(f"  min_topic_size: {min_size} (auto — 0.5% of {len(texts):,} reviews)")
-
-    #Run BERTopic to discover categories
-    print(f"Running BERTopic ")
-    n_topics = args.topics if args.topics else "auto"
 
     try:
-        cache_path = f"data/processed/embeddings_cache_{platform_tag}_{sentiment_tag}.npy"
-        categories,topic_details = run_bertopic(texts,n_topics = n_topics,min_topic_size = min_size, embed_cache=cache_path)
+        if args.platform:
+            run_single_platform_audit(df, args.platform, sentiment_tag, args)
+        else:
+            run_multi_platform_pipeline(df, sentiment_tag, args)
     except ImportError as e:
         print(f"\n Missing package: {e}")
-        print(f"   Run: pip install bertopic ")
+        print(f"   Run: pip install bertopic")
         sys.exit(1)
-    except Exception as e:
-        print(f"\n  BERTopic failed: {e}")
-        print(f" Saving static fallback categories instead.")
-        log.error("BERTopic failed: %s", e, exc_info=True)
-        categories = STATIC_FALLBACK
-        topic_details = [
-            {
-                "topic_id": i,
-                "label": c,
-                "keywords" : c.split(),
-                "count": 0
-            }
-            for i,c in enumerate(STATIC_FALLBACK)
-            #enumerate is used to get the index of the category(0, "product quality")
-            #(1, "delivery and shipping")
-            #(2, "customer service")
-        ]
 
-    # Dynamic improvement 3 — remove noise topics automatically
-    topic_details = filter_noise_topics(topic_details)
-
-    # Remove duplicate labels
-    seen:   set[str]  = set()
-    unique: list[str] = []
-    for detail in topic_details:
-        cat = detail["label"]
-        if cat not in seen:
-            seen.add(cat)
-            unique.append(cat)
-    categories    = unique
-    topic_details = [d for d in topic_details if d["label"] in seen]
-
-    # Show discovered categories
-    print(f"  Found {len(categories)} categories:\n")
-    for i, category in enumerate(categories, start=1):
-
-        detail: dict = {}
-
-        # Find the matching topic
-        for d in topic_details:
-            if d["label"] == category:
-                detail = d
-                break
-
-        keywords = detail["keywords"][:5]
-        kws = ", ".join(keywords)
-        cnt = detail["count"]
-
-        print(f"Topic Number : {i}")
-        print(f"Category     : {category}")
-        print(f"Reviews      : {cnt}")
-        print(f"Keywords     : {kws}")
-        print("-" * 50)
-
-    #Save outputs
-    print(f"Saving outputs to {output_cats} and {output_info}")
-    os.makedirs("data/processed", exist_ok=True)
-
-    # Main output: just the category labels (used by categoriser.py)
-    with open(output_cats, "w") as f:
-        json.dump(categories, f, indent=2)
-    print(f" Categories saved → {output_cats}")
-
-    # Detailed output: full topic info for dissertation
-    info_payload = {
-        "n_categories":  len(categories),
-        "sample_size":   len(texts),
-        "platform":      args.platform or "all",
-        "sentiment":     args.sentiment,
-        "min_topic_size": min_size,
-        "categories":    categories,
-        "topic_details": topic_details,
-    }
-    with open(output_info, "w") as f:
-        json.dump(info_payload, f, indent=2)
-    print(f" Topic details saved → {output_info}")
-
-    # ── Final summary ─────────────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
-    print(f" Category discovery complete! ")
-    print(f"{'=' * 60}")
-    print(f"\n  Discovered {len(categories)} data-driven complaint categories")
-    print(f"  (replaced {len(STATIC_FALLBACK)} static hardcoded categories)\n")
-    print(f"  Dynamic improvements applied:")
-    print(f"   Language filter  — non-English reviews removed automatically")
-    print(f"   Auto min-size    — threshold scaled to corpus ({min_size} reviews)")
-    print(f"   Noise filter     — rating-meta and cross-topic noise removed")
-    print(f"   Per-sentiment    — saved to {output_cats}\n")
-    print(f"  Next steps:")
-    print(f"   • categoriser.py will now load these automatically")
-    print(f"   • Run for other sentiments:")
-    print(f"       python scripts/discover_categories.py --sentiment positive")
-    print(f"       python scripts/discover_categories.py --sentiment neutral")
-    print(f"   • Re-run any time your data changes: python scripts/discover_categories.py")
-    print(f"   • For dissertation: compare these vs static 7 in your results chapter\n")
+    print(f" Category discovery complete!")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
