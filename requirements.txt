@@ -31,3 +31,26 @@ flake8==7.0.0
 # ── Utilities ─────────────────────────────────────────────────────────────────
 tqdm==4.66.2
 requests==2.31.0
+
+# ── RAG / LLM (rag/pipeline.py, rag/prompts.py) ────────────────────────────────
+# These were already installed and in active use but missing from this file —
+# added so `pip install -r requirements.txt` actually reproduces the working
+# pipeline. Versions pinned to what's currently installed in venv/.
+torch==2.13.0
+sentence-transformers==5.7.0
+faiss-cpu==1.15.0
+huggingface_hub==1.26.0
+langchain-core==1.5.3
+langchain-classic==1.0.8
+langchain-community==0.4.2
+langchain-groq==1.1.3
+langchain-huggingface==1.2.2
+langchain-text-splitters==1.1.2
+groq==0.37.1
+
+# ── RAG evaluation (scripts/evaluate_rag.py) ───────────────────────────────────
+# Pinned: ragas 0.4.x hard-imports a langchain-community submodule that no
+# longer exists post the LangChain 1.0 rebrand above. evaluate_rag.py includes
+# a compatibility shim that depends on this exact import path still breaking
+# the same way — if you bump ragas, re-check that shim still applies.
+ragas==0.4.3

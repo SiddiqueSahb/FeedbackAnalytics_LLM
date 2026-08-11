@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
   
     
+    # Retrieval 
+    TOP_K_RETRIEVAL: int = 6
+
    
 
 
