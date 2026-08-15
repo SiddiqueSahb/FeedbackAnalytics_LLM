@@ -5,40 +5,32 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
+
 from nlp.embedding_service import semantic_search
 
+queries = [
+    "battery stopped charging after one week",
+    "customer support ignored my emails",
+    "flight was cancelled",
+    "food was cold and tasteless",
+    "package arrived late and damaged",
+]
 
-print("=" * 80)
-print("Testing Semantic Search")
-print("=" * 80)
+for query in queries:
 
-query = "battery drains quickly"
+    print("=" * 100)
+    print("QUERY:")
+    print(query)
 
-results = semantic_search(
-    query=query,
-    top_k=5
-)
+    results = semantic_search(query, top_k=5)
 
-results_rating = semantic_search(
-    query="battery drains quickly",
-    top_k=5,
-    min_rating=3
-)
+    print(f"\nRetrieved {len(results)} reviews\n")
 
-results_negative = semantic_search(
-    query="battery drains quickly",
-    top_k=5,
-    sentiment_filter="negative"
-)
-
-print(f"\nQuery: {query}")
-print(f"Retrieved {len(results)} reviews\n")
-
-for i, review in enumerate(results, start=1):
-    print(f"Result {i}")
-    print(f"Similarity : {review['similarity_percentage']}")
-    print(f"Platform   : {review['platform']}")
-    print(f"Rating     : {review['rating']}")
-    print(f"Sentiment  : {review['sentiment_label']}")
-    print(f"Review     : {review['text']}")
-    print("-" * 80)
+    for i, review in enumerate(results, start=1):
+        print(f"Result {i}")
+        print(f"Similarity : {review['similarity_score']}")
+        print(f"Platform   : {review['platform']}")
+        print(f"Rating     : {review['rating']}")
+        print(f"Sentiment  : {review['sentiment_label']}")
+        print(f"Review     : {review['text'][:150]}")
+        print("-" * 80)

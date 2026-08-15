@@ -28,10 +28,14 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+import threading
 import numpy as np
 from functools import lru_cache
 
 from config import settings
+
+_embedder_lock = threading.Lock()
+_classifier_lock = threading.Lock()
 
 UNCLASSIFIED = "Unclassified / Emerging Complaint"
 
@@ -118,9 +122,16 @@ def _nli_hypothesis(cat: dict) -> str:
 
 
 @lru_cache(maxsize=1)
-def _get_embedder():
+def _get_embedder_uncached():
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer(settings.EMBEDDING_MODEL)
+
+
+def _get_embedder():
+    # Lock closes the gap lru_cache leaves open: two threads both missing
+    # the cache at once would otherwise both load this model concurrently.
+    with _embedder_lock:
+        return _get_embedder_uncached()
 
 
 def _category_embeddings(categories: tuple) -> np.ndarray:
@@ -136,9 +147,17 @@ def _categories_key(categories: list[dict]) -> tuple:
 
 
 @lru_cache(maxsize=4)
-def _get_classifier(model_name: str):
+def _get_classifier_uncached(model_name: str):
     from transformers import pipeline
     return pipeline("zero-shot-classification", model=model_name, device=-1)
+
+
+def _get_classifier(model_name: str):
+    # Single lock rather than per-model-name — in practice this is only
+    # ever called with one or two distinct model names, so the small extra
+    # serialization cost isn't worth the complexity of a lock-per-key.
+    with _classifier_lock:
+        return _get_classifier_uncached(model_name)
 
 
 def reload_categories(sentiment: str = "negative") -> list[dict]:

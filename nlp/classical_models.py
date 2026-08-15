@@ -24,7 +24,13 @@ from logger import get_logger
 log = get_logger("nlp.classical")
 
 #Model store path
-MODEL_DIR = "models/classical"
+# Anchored to the project root (not a bare relative string) so this
+# resolves correctly regardless of the directory the process was launched
+# from — a plain "models/classical" silently fails to load if uvicorn is
+# started from anywhere other than the project root, with no error, just
+# every prediction quietly returning "unknown".
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(_PROJECT_ROOT, "models", "classical")
 LR_PATH   = os.path.join(MODEL_DIR, "logistic_regression.pkl")
 NB_PATH   = os.path.join(MODEL_DIR, "naive_bayes.pkl")
 VEC_PATH  = os.path.join(MODEL_DIR, "tfidf_vectorizer.pkl")

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from functools import lru_cache
 from typing import Optional
 
@@ -17,30 +18,26 @@ sys.path.append(
 )
 
 from config import settings
+from logger import get_logger
+
+log = get_logger("nlp.embedding_service")
+
+_resources_lock = threading.Lock()
 
 
-# Load resources once
+# Load resources once. lru_cache alone doesn't stop two threads both
+# starting this (slow — model + FAISS index + 407MB parquet) on a cold
+# cache; the lock makes the second caller wait for the first's result
+# instead of loading everything twice.
 @lru_cache(maxsize=1)
-def _load_resources():
-    """
-    Load SentenceTransformer, FAISS index and review dataframe once.
-    Cached using lru_cache so they are not reloaded on every request.
-    """
+def _load_resources_uncached():
 
     import faiss
     from sentence_transformers import SentenceTransformer
 
-    print("=" * 80)
-    print("Loading resources...")
-    print("=" * 80)
+    log.info("Loading embedding resources: model, FAISS index, dataframe...")
 
-    # Load embedding model
-    print("Loading SentenceTransformer...")
     model = SentenceTransformer(settings.EMBEDDING_MODEL)
-    print("✓ Model loaded")
-
-    # Load FAISS index
-    print("\nLoading FAISS index...")
 
     if not os.path.exists(settings.INDEX_PATH):
         raise FileNotFoundError(
@@ -49,12 +46,7 @@ def _load_resources():
         )
 
     index = faiss.read_index(settings.INDEX_PATH)
-
-    print(" FAISS loaded")
-    print(f"Total vectors: {index.ntotal:,}")
-
-    # Load dataframe
-    print("\nLoading review dataframe...")
+    log.info("FAISS index loaded | vectors=%d | dim=%d", index.ntotal, index.d)
 
     if not os.path.exists(settings.DATA_PATH):
         raise FileNotFoundError(
@@ -62,14 +54,15 @@ def _load_resources():
         )
 
     df = pd.read_parquet(settings.DATA_PATH)
-
-    print("DataFrame loaded")
-    print(f"Rows    : {len(df):,}")
-    print(f"Columns : {list(df.columns)}")
-
-    print("=" * 80)
+    log.info("Review dataframe loaded | rows=%d", len(df))
 
     return model, index, df
+
+
+def _load_resources():
+    """Thread-safe wrapper — see comment above _load_resources_uncached."""
+    with _resources_lock:
+        return _load_resources_uncached()
 
 
 # Semantic Search
@@ -110,76 +103,35 @@ def semantic_search(
 
     model, index, df = _load_resources()
 
-    print("\nEncoding query...")
-    print("Query:", query)
-
-    query_embedding = model.encode(
-        [query],
-        normalize_embeddings=True
-    ).astype(np.float32)
-
-    print("Embedding shape:", query_embedding.shape)
+    query_embedding = np.ascontiguousarray(
+        model.encode([query], normalize_embeddings=True).astype(np.float32)
+    )
 
     # Search FAISS
     fetch_k = min(top_k * 5, index.ntotal)
 
-    print("\nSearching FAISS...")
-    print(f"Fetching {fetch_k} candidates")
-
-    scores, indices = index.search(
-        query_embedding,
-        fetch_k
-    )
-
-    print("\nTop Similarity Scores")
-    print(scores[0][:10])
-
-    print("\nTop Indices")
-    print(indices[0][:10])
+    scores, indices = index.search(query_embedding, fetch_k)
 
     results = []
 
-    print("\nChecking retrieved reviews...\n")
-
-    for rank, (score, idx) in enumerate(
-        zip(scores[0], indices[0]),
-        start=1
-    ):
-
-        print(f"Candidate {rank}")
-        print("Index      :", idx)
-        print("Similarity :", round(float(score), 4))
+    for score, idx in zip(scores[0], indices[0]):
 
         if idx < 0 or idx >= len(df):
-            print(" Invalid dataframe index")
             continue
 
         row = df.iloc[idx]
 
-        print("Platform   :", row["platform"])
-        print("Sentiment  :", row["sentiment_label"])
-        print("Rating     :", row["rating"])
-
         # Platform filter
-        if platform_filter:
-
-            if row["platform"] != platform_filter:
-                print(" Platform filter failed")
-                continue
+        if platform_filter and row["platform"] != platform_filter:
+            continue
 
         # Sentiment filter
-        if sentiment_filter:
-
-            if row["sentiment_label"] != sentiment_filter:
-                print(" Sentiment filter failed")
-                continue
+        if sentiment_filter and row["sentiment_label"] != sentiment_filter:
+            continue
 
         # Rating filter
         if row["rating"] < min_rating:
-            print(" Rating filter failed")
             continue
-
-        print(" Accepted")
 
         results.append(
             {
@@ -192,13 +144,13 @@ def semantic_search(
             }
         )
 
-        print("-" * 80)
-
         if len(results) >= top_k:
             break
 
-    print("\nFinished")
-    print(f"Returned {len(results)} reviews")
+    log.debug(
+        "Semantic search | query='%s' | fetch_k=%d | returned=%d",
+        query[:60], fetch_k, len(results),
+    )
 
     return results
 

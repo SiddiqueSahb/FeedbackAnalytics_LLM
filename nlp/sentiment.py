@@ -9,12 +9,34 @@ Five sentiment classifiers for dissertation comparison:
 
 from __future__ import annotations
 import sys,os
+import threading
 import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import Optional
 from functools import lru_cache
 from config import settings
+
+
+def _thread_safe_cache(build_fn):
+    """
+    Wrap a zero-argument builder in a true once-only lazy singleton.
+
+    functools.lru_cache on its own only protects its internal cache dict
+    from corruption — it does not stop two threads from both starting the
+    wrapped call at the same moment on a cold cache, which would build two
+    copies of the same model in memory. The lock here closes that gap:
+    whichever thread gets there first builds it, the lru_cache underneath
+    means every call after that (from any thread) is a instant cache hit.
+    """
+    lock = threading.Lock()
+    cached = lru_cache(maxsize=1)(build_fn)
+
+    def get():
+        with lock:
+            return cached()
+
+    return get
 
 #  1. VADER (Baseline)
 class VaderSentiment:
@@ -101,7 +123,6 @@ class FineTunedSentiment:
                 return
         
             from transformers import AutoTokenizer, AutoModelForSequenceClassification
-            import torch
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
             self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
             self.model.eval()
@@ -148,37 +169,32 @@ class FineTunedSentiment:
                 "model": "distilbert_finetuned",
                 }
 
-    # cached after first call    
-@lru_cache(maxsize=1)
-def get_vader() -> VaderSentiment:
-    """Return cached VaderSentiment instance."""
-    return VaderSentiment()
+    # cached after first call, thread-safe against concurrent cold-start calls
+get_vader = _thread_safe_cache(VaderSentiment)
+"""Return cached VaderSentiment instance."""
+
+get_roberta = _thread_safe_cache(RobertaSentiment)
+"""Return cached RobertaSentiment instance."""
+
+get_finetuned = _thread_safe_cache(FineTunedSentiment)
+"""Return cached FineTunedSentiment instance."""
 
 
-@lru_cache(maxsize=1)
-def get_roberta() -> RobertaSentiment:
-    """Return cached RobertaSentiment instance."""
-    return RobertaSentiment()
-
-
-@lru_cache(maxsize=1)
-def get_finetuned() -> FineTunedSentiment:
-    """Return cached FineTunedSentiment instance."""
-    return FineTunedSentiment()
-
-
-@lru_cache(maxsize=1)
-def get_logistic_regression():
-    """Return cached LogisticRegressionSentiment instance."""
+def _build_logistic_regression():
     from nlp.classical_models import LogisticRegressionSentiment
     return LogisticRegressionSentiment()
 
 
-@lru_cache(maxsize=1)
-def get_naive_bayes():
-    """Return cached NaiveBayesSentiment instance."""
+def _build_naive_bayes():
     from nlp.classical_models import NaiveBayesSentiment
     return NaiveBayesSentiment()
+
+
+get_logistic_regression = _thread_safe_cache(_build_logistic_regression)
+"""Return cached LogisticRegressionSentiment instance."""
+
+get_naive_bayes = _thread_safe_cache(_build_naive_bayes)
+"""Return cached NaiveBayesSentiment instance."""
 
 
 def compare_all(text:str) -> dict[str,dict[str,object]]:
@@ -247,6 +263,23 @@ def compare_all(text:str) -> dict[str,dict[str,object]]:
             "error": str(e)}
 
     return results
+
+
+def predict_sentiment(text: str) -> dict[str, object]:
+    """
+    Predict sentiment using the fine-tuned DistilBERT model.
+
+    This is the production sentiment model used by the application.
+
+    Returns:
+        {
+            "label": "negative",
+            "confidence": 0.998,
+            "scores": {...},
+            "model": "distilbert_finetuned"
+        }
+    """
+    return get_finetuned().predict(text)
 
 
 if __name__ == "__main__":

@@ -24,16 +24,51 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import threading
 from typing import Optional, Any
 from logger import get_logger
 from functools import lru_cache
 from config import settings
-from rag.prompts import RAG_PROMPT, CONDENSE_QUESTION_PROMPT, is_complaint_question
+from rag.prompts import (
+    RAG_PROMPT,
+    CONDENSE_QUESTION_PROMPT,
+    is_complaint_question,
+    is_complaint_question_llm,
+)
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
 
 log = get_logger("rag.pipeline")
+
+_vectorstore_lock = threading.Lock()
+
+# Minimum relevance score (0-1, 1 = most similar) a retrieved review must
+# clear to be handed to the LLM at all. Without this, FAISS always returns
+# its top-k documents regardless of how irrelevant they are — for a
+# question like "Who is the CEO of Apple?", the retriever would still hand
+# back 5 customer reviews, and the only thing preventing a hallucinated
+# answer would be whether the LLM correctly judges those reviews as
+# insufficient and follows RAG_PROMPT's refusal instruction. This constant
+# makes "irrelevant" a fact the code checks before generation, not a
+# judgement the model makes every time.
+#
+# 0.35 is a starting point, not a validated constant — this index uses
+# Euclidean distance on normalised all-MiniLM-L6-v2 embeddings, converted
+# to a [0, 1] score via 1 - distance/sqrt(2) (see langchain_core's
+# VectorStore._euclidean_relevance_score_fn). Tune this empirically using
+# the evaluation plan's Group D questions (docs/RAG_Hallucination_Audit.md)
+# before treating it as final.
+SIMILARITY_THRESHOLD = 0.35
+
+# Safety cap on how much of a single review's text can enter the prompt.
+# Reviews in this corpus are short (median 19-85 words depending on
+# platform), so this is not expected to bind under current data — it's a
+# guard against context overflow if the index is ever extended with
+# longer-form content.
+MAX_REVIEW_CHARS = 1000
 
 # create_stuff_documents_chain's default document formatter only inserts
 # doc.page_content into {context} — none of the metadata (platform, rating,
@@ -65,13 +100,18 @@ def _get_llm() -> Optional[Any]:
             api_key=settings.GROQ_API_KEY,
             model_name=settings.GROQ_MODEL,
             temperature=settings.LLM_TEMPERATURE,
+            # Without this, a slow/stuck Groq call can run well past the
+            # frontend's own 60s request timeout — the backend keeps working
+            # on a request the user has already been told failed. 30s keeps
+            # the backend's own failure surfacing before that happens.
+            timeout=30,
         )
     return None
 
 
 #Load FAISS Vector DB
 @lru_cache(maxsize=1)
-def _get_vectorstore() -> Any:
+def _get_vectorstore_uncached() -> Any:
     """Load LangChain FAISS vectorstore (cached after first load)."""
     from langchain_community.vectorstores import FAISS as LangFAISS
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -96,6 +136,80 @@ def _get_vectorstore() -> Any:
     log.info("LangChain FAISS vectorstore loaded")
     return vs
 
+
+def _get_vectorstore() -> Any:
+    # Lock closes the gap lru_cache leaves open on its own — see the same
+    # pattern/comment in nlp/embedding_service.py._load_resources.
+    with _vectorstore_lock:
+        return _get_vectorstore_uncached()
+
+
+def _make_grounded_retriever(
+    vectorstore: Any,
+    platform_filter: Optional[dict[str, str]],
+    k: int = 5,
+    fetch_k: int = 20,
+    lambda_mult: float = 0.5,
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> RunnableLambda:
+    """
+    Build a retriever that only ever returns documents clearing
+    `threshold` on relevance — the hard gate that a plain
+    `as_retriever(search_type="mmr", ...)` does not provide, since MMR only
+    controls *diversity* among whatever top-k FAISS finds, not whether any
+    of it is actually relevant.
+
+    Two passes over the same candidate pool:
+      1. `similarity_search_with_relevance_scores` scores every candidate
+         and keeps only those at or above `threshold`. If nothing clears
+         it, an empty list is returned — the caller (ask()) is expected to
+         treat that as "refuse", not "answer from nothing".
+      2. `max_marginal_relevance_search` reruns MMR over the same
+         (query, filter) to pick a diverse k from the pool, then that
+         selection is intersected with step 1's passing set — so MMR's
+         diversity re-ranking can never smuggle in a sub-threshold review
+         just because it was topically distinct from the others.
+
+    Each returned Document is a fresh copy (never the FAISS docstore's own
+    object) with its relevance score attached at metadata["similarity_score"]
+    and its text capped at MAX_REVIEW_CHARS — see the module-level comments
+    on both.
+    """
+
+    def _retrieve(query: str) -> list[Document]:
+        scored = vectorstore.similarity_search_with_relevance_scores(
+            query, k=fetch_k, filter=platform_filter,
+        )
+        passing_scores = {
+            doc.metadata.get("review_id"): score
+            for doc, score in scored
+            if score >= threshold
+        }
+        if not passing_scores:
+            return []
+
+        mmr_docs = vectorstore.max_marginal_relevance_search(
+            query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=platform_filter,
+        )
+
+        grounded_docs: list[Document] = []
+        for doc in mmr_docs:
+            score = passing_scores.get(doc.metadata.get("review_id"))
+            if score is None:
+                continue
+
+            content = doc.page_content
+            if len(content) > MAX_REVIEW_CHARS:
+                content = content[:MAX_REVIEW_CHARS] + "…"
+
+            meta = dict(doc.metadata)
+            meta["similarity_score"] = round(float(score), 4)
+            grounded_docs.append(Document(page_content=content, metadata=meta))
+
+        return grounded_docs
+
+    return RunnableLambda(_retrieve)
+
 #It converts the raw LangChain Document objects returned by FAISS into a clean, structured format that your UI (Streamlit/FastAPI) 
 #can easily display.
 def _format_sources(source_docs: list) -> list[dict[str, object]]:
@@ -118,6 +232,7 @@ def _format_sources(source_docs: list) -> list[dict[str, object]]:
             "sentiment_label":  meta.get("sentiment_label", "unknown"),
             "rating":           meta.get("rating",          0),
             "review_id":        meta.get("review_id",       ""),
+            "similarity_score": meta.get("similarity_score"),
         })
     return sources
 
@@ -161,6 +276,43 @@ def _build_history_string(chat_history: list[dict]) -> list[tuple[str, str]]:
 
     # Return the formatted conversation history
     return pairs
+
+
+
+# Recognised platform names, checked against the raw question text.
+_PLATFORM_KEYWORDS: dict[str, str] = {
+    "amazon": "amazon",
+    "yelp": "yelp",
+    "twitter": "twitter_airline",
+    "airline": "twitter_airline",
+}
+
+
+def _detect_platform_filter(question: str) -> Optional[dict[str, str]]:
+    """
+    If the question names a specific platform, return a FAISS metadata
+    filter restricting retrieval to that platform's reviews.
+
+    Without this, "What are the top complaints on Amazon?" and "What are
+    the top complaints on Yelp?" hit the exact same unfiltered similarity
+    search — the word "Amazon" is just more text for the embedding to
+    match against, not a constraint, so the retriever is free to return
+    Yelp or Twitter Airline reviews for an Amazon-specific question. This
+    checks the question for a platform name and, if found, narrows
+    retrieval to reviews tagged with that platform in build_index.py's
+    stored metadata.
+
+    Only looks at the current question, not chat_history — a follow-up
+    like "give me an example of one of those" won't carry the filter over
+    from an earlier turn. Good enough to fix the reproduced bug (asking
+    about one named platform returning another platform's reviews)
+    without adding history-scanning complexity.
+    """
+    text = question.lower()
+    for keyword, platform in _PLATFORM_KEYWORDS.items():
+        if keyword in text:
+            return {"platform": platform}
+    return None
 
 
 def _format_chat_history_text(pairs: list[tuple[str, str]]) -> str:
@@ -209,6 +361,13 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
     log.info("RAG ask | question='%s' history_len=%d",question[:60], len(chat_history or []))
 
 
+    # Fixed refusal string returned whenever retrieval finds nothing above
+    # SIMILARITY_THRESHOLD. Deliberately distinct from OUT_OF_SCOPE_MSG:
+    # this fires when a question *is* answerable in principle but the
+    # index has no relevant evidence for it, not when the question is
+    # about a different subject entirely.
+    NO_EVIDENCE_MSG = "I couldn't find enough relevant customer reviews to answer this question."
+
     # Check whether the LLM API key is available before processing the request
     llm = _get_llm()
     if llm is None:
@@ -217,26 +376,67 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
             "sources":         [],
             "use_case":        "complaint_exploration",
             "retrieval_count": 0,
+            "grounded":        False,
         }
 
-    # Ensure the question is related to customer reviews or complaints
+    # Ensure the question is related to customer reviews or complaints.
+    # Cheap keyword check first — catches named off-topic subjects (weather,
+    # sports, coding, ...) with no LLM call.
     if not is_complaint_question(question):
-        log.info("Out-of-scope question rejected: %s", question[:60])
+        log.info("Out-of-scope question rejected by keyword guard: %s", question[:60])
         return {
             "answer":          OUT_OF_SCOPE_MSG,
             "sources":         [],
             "use_case":        "complaint_exploration",
             "retrieval_count": 0,
+            "grounded":        False,
+        }
+
+    # Second-stage guard: the keyword list above only names nine specific
+    # off-topic subjects, so "Who is the CEO of Apple?" or "What is quantum
+    # computing?" pass through it untouched. This LLM classifier catches
+    # what the keyword list misses, at the cost of one extra small LLM call
+    # on every question that clears the first gate.
+    if not is_complaint_question_llm(question, llm=llm):
+        log.info("Out-of-scope question rejected by LLM guard: %s", question[:60])
+        return {
+            "answer":          OUT_OF_SCOPE_MSG,
+            "sources":         [],
+            "use_case":        "complaint_exploration",
+            "retrieval_count": 0,
+            "grounded":        False,
         }
 
     try:
-        # Load the FAISS vector database and create a retriever
+        # Load the FAISS vector database
         vectorstore = _get_vectorstore()
-        retriever = vectorstore.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 5, "fetch_k": 20},
+
+        platform_filter = _detect_platform_filter(question)
+        if platform_filter:
+            log.info("Platform filter applied: %s", platform_filter)
+
+        fetch_k = 50 if platform_filter else 20
+        retriever = _make_grounded_retriever(
+            vectorstore, platform_filter, k=5, fetch_k=fetch_k,
         )
-        log.debug("Vectorstore + retriever ready")
+        log.debug("Grounded retriever ready (threshold=%.2f)", SIMILARITY_THRESHOLD)
+
+        # Fast path for single-turn questions: the retrieval query is the
+        # raw question with no reformulation involved, so it can be probed
+        # directly, before building or invoking the chain at all. A
+        # clearly out-of-domain question that both guards above missed is
+        # refused here without spending an LLM call on generation.
+        if not chat_history:
+            probe_docs = retriever.invoke(question)
+            if not probe_docs:
+                log.info("No documents cleared the similarity threshold (fast path): %s", question[:60])
+                return {
+                    "answer":          NO_EVIDENCE_MSG,
+                    "sources":         [],
+                    "use_case":        "complaint_exploration",
+                    "retrieval_count": 0,
+                    "grounded":        False,
+                }
 
         # LCEL replacement for the deprecated ConversationalRetrievalChain +
         # ConversationBufferMemory pair. No memory object: chat_history is
@@ -261,8 +461,31 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
         # Retrieve relevant reviews and generate the final response
         result = chain.invoke({"input": question, "chat_history": chat_history_text})
 
+        retrieved_docs = result.get("context", [])
+
+        if not retrieved_docs:
+            # Hard backstop, not a repeat of the fast-path check above: this
+            # covers multi-turn questions, where the retrieval query is an
+            # LLM-reformulated standalone question the fast path above
+            # never sees. If nothing cleared the relevance threshold for
+            # that reformulated query, the answer the model generated is
+            # discarded outright — the model was still asked to answer from
+            # empty context, and RAG_PROMPT's refusal rule is an
+            # instruction to it, not a guarantee. This is the guarantee.
+            log.info(
+                "No grounded context after chain execution, overriding generated answer: %s",
+                question[:60],
+            )
+            return {
+                "answer":          NO_EVIDENCE_MSG,
+                "sources":         [],
+                "use_case":        "complaint_exploration",
+                "retrieval_count": 0,
+                "grounded":        False,
+            }
+
         # Format the retrieved reviews for display in the application
-        sources = _format_sources(result.get("context", []))
+        sources = _format_sources(retrieved_docs)
 
         # Log the response for debugging and monitoring
         log.info(
@@ -277,6 +500,7 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
             "sources":         sources,
             "use_case":        "complaint_exploration",
             "retrieval_count": len(sources),
+            "grounded":        True,
         }
 
     # Handle the case where the FAISS index has not been created
@@ -287,6 +511,7 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
             "sources":         [],
             "use_case":        "complaint_exploration",
             "retrieval_count": 0,
+            "grounded":        False,
         }
 
     # Handle any unexpected errors during the RAG pipeline
@@ -297,4 +522,5 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
             "sources":         [],
             "use_case":        "complaint_exploration",
             "retrieval_count": 0,
+            "grounded":        False,
         }
