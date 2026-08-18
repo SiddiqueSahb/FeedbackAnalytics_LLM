@@ -44,6 +44,10 @@ services:
     container_name: feedbackiq-frontend
     ports:
       - "8501:8501"
+    env_file:
+      # Same file as the backend, so both containers read the same API_KEY.
+      # If they disagree the frontend gets 403s from every call.
+      - .env
     environment:
       - API_URL=http://backend:8000
     depends_on:

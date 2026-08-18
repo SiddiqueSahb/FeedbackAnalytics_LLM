@@ -10,33 +10,15 @@ The chapter follows the CRISP-DM phases adopted in Chapter 3. Section 4.1 restat
 
 ## 4.1 Business Understanding
 
-### 4.1.1 The problem
+Chapter 1 established the problem: organisations hold more feedback than they can read, and the practical question is which method to trust to extract signal from it. Three analytically distinct sub-problems follow — supervised classification, unsupervised discovery, and grounded generation, where the risk is a fluent answer with no basis in evidence. This chapter delivers Objectives 2 to 6.
 
-Organisations hold more customer feedback than they can read, and the practical question is not whether it contains useful signal but which method should be trusted to extract it. Three sub-problems follow, and they are analytically distinct. Classifying the sentiment of a review is supervised. Identifying what customers complain about is unsupervised, because the categories are not known in advance. Answering an analyst's question about those complaints is a generation problem, where the risk is a fluent answer with no basis in evidence.
-
-### 4.1.2 Objectives for this chapter
-
-This chapter delivers Objectives 2 to 6 from Chapter 1: preparing the unified corpus, comparing five sentiment classifiers with diagnosis of any anomalous result, discovering and consolidating complaint topics, building the retrieval and question-answering components with a baseline to compare against, and evaluating each stage with metrics appropriate to it.
-
-### 4.1.3 Success criteria
-
-Success is defined per stage, and deliberately not as a single accuracy target.
-
-For sentiment classification, the criterion is a controlled comparison in which differences between models cannot be attributed to differences in data, reported at a granularity that reveals class-level and platform-level behaviour. A ranking alone would not satisfy it.
-
-For complaint discovery, with no ground truth available, the criterion is a taxonomy whose categories are separable from one another, internally coherent, populated across platforms, and honest about what it fails to cover.
-
-For question answering, the criterion is measurable grounding: answers traceable to identifiable source reviews, scored against a standalone baseline on the same questions.
+Success is defined per stage rather than as a single accuracy target. For classification, a controlled comparison in which differences between models cannot be attributed to differences in data, reported at a granularity that reveals class-level and platform-level behaviour; a ranking alone would not satisfy it. For discovery, with no ground truth, a taxonomy whose categories are separable, internally coherent, populated across platforms, and honest about what it fails to cover. For question answering, measurable grounding: answers traceable to identifiable source reviews, scored against a standalone baseline on the same questions.
 
 ---
 
 ## 4.2 Data Understanding
 
-### 4.2.1 Sources
-
-Three public datasets are combined: Amazon product reviews, Yelp business reviews, and the Twitter US Airline Sentiment corpus. All were obtained from their public distributions. No data was scraped and none was collected from individuals.
-
-### 4.2.2 Register differences
+### 4.2.1 Register differences
 
 The comparison in this study depends on the three sources differing in register, so that claim is measured rather than assumed. Figure 4.1 reports word counts from a seeded sample of up to 40,000 reviews per platform.
 
@@ -44,9 +26,11 @@ The differences are substantial and not in the direction intuition suggests. Yel
 
 Two properties therefore separate the sources: central length, on which Yelp stands apart, and dispersion, on which Twitter stands apart. Amazon sits between them on both. This is the empirical basis for treating the corpus as multi-domain, and it is what makes the per-platform analysis in Section 4.5.4 meaningful.
 
-*(Figure 4.1 — Review length by platform: distribution on a log scale, and median word count. Produced by `evaluate/generate_figures.py`; saved as `data/results/figures/fig_4_1_review_length_by_platform.png`.)*
+![Figure 4.1](../data/results/figures/fig_4_1_review_length_by_platform.png){width=4.6in}
 
-### 4.2.3 Composition
+**Figure 4.1** — Review length by platform: distribution on a log scale, with median word counts. Seeded sample of up to 40,000 reviews per platform. *(Produced by `evaluate/generate_figures.py`.)*
+
+### 4.2.2 Composition
 
 After preparation the corpus holds 642,692 reviews. Table 4.1 gives the composition.
 
@@ -63,29 +47,17 @@ Sentiment classes are close to balanced: negative 218,799 (34.0%), neutral 212,5
 
 Platform representation, by contrast, is heavily skewed. Yelp contributes seventy per cent and Twitter Airline barely two. This asymmetry drives two later design decisions: topic discovery runs per platform (Section 4.4.2), and the diagnostic evaluation samples equally from each platform (Section 4.5.4).
 
-### 4.2.4 Data quality issues
+### 4.2.3 Data quality issues
 
-Exploratory analysis identified four issues, each carried forward into the interpretation of results.
-
-Labels for Amazon and Yelp derive from star ratings, not from reading the text. A four-star review containing a specific complaint is labelled positive. This places a ceiling on achievable accuracy that no model can exceed.
-
-Label provenance is not uniform. Twitter labels come from human annotation, so "neutral" means a three-star rating on two platforms and a human judgement of no clear sentiment on the third. The neutral class is therefore not one construct but two — a point that becomes important when the neutral class turns out to be where most models fail.
-
-Text quality varies with register. Twitter posts contain handles, abbreviations and truncation absent from the other sources.
-
-Some reviews are non-English. These are retained in the corpus but filtered out at the topic discovery stage, where mixed languages degrade clustering.
+Four issues carry forward into the interpretation of results, and the first two are the consequential ones. Rating-derived labels mean a four-star review containing a specific complaint is labelled positive, placing a ceiling on achievable accuracy that no model can exceed. Label provenance is also not uniform: Twitter labels come from human annotation, so "neutral" is a three-star rating on two platforms and a judgement of no clear sentiment on the third — not one construct but two, which matters once the neutral class turns out to be where most models fail. Twitter text also contains handles, abbreviations and truncation absent elsewhere, and some non-English reviews are retained in the corpus but filtered at the discovery stage, where mixed languages cluster by language rather than subject.
 
 ---
 
 ## 4.3 Data Preparation
 
-### 4.3.1 Cleaning and unification
+Preparation followed the procedure specified in Section 3.5: schema unification, removal of records missing text or labels, case and whitespace normalisation, rule-based labelling from star ratings, and class balancing during sampling. A four-record sample of the resulting corpus, showing the schema and the effect of cleaning, is given in Appendix B.2.
 
-Each source was mapped onto a common schema of `review_id`, `platform`, `product_category`, `text`, `cleaned_text`, `rating`, `sentiment_label` and `date`. Records missing text or a sentiment label were dropped, as were reviews of five characters or fewer, which carry no usable signal. Text was lowercased and whitespace normalised to produce `cleaned_text`; the original `text` is retained because the retrieval stage benefits from readable output while models consume the cleaned form.
-
-Sentiment labels for Amazon and Yelp were derived by rule: ratings of two or below negative, three neutral, four or above positive. Twitter's existing annotation was mapped to the same three classes and given a pseudo-rating so the schema stays uniform. Class balancing was applied during sampling, producing the distribution in Section 4.2.3.
-
-### 4.3.2 Feature extraction
+### 4.3.1 Feature extraction
 
 Feature representation differs by model family, which is itself part of the comparison.
 
@@ -93,13 +65,13 @@ Classical models use TF-IDF vectors over unigrams and bigrams. VADER requires no
 
 No manual feature selection or scaling was applied. TF-IDF weighting handles term importance implicitly, and embedding dimensions are not individually interpretable, so selecting among them would not be meaningful.
 
-### 4.3.3 Splitting
+### 4.3.2 Splitting
 
 The sentiment comparison uses an 80/20 stratified split with `random_state=42`, producing a held-out test set of **128,539 reviews** with the class distribution preserved.
 
 The fine-tuned model was trained on a separately generated 70/15/15 stratified split, also seeded at 42. Its validation partition drove early stopping and checkpoint selection; its test partition of 88,854 reviews was held out entirely.
 
-As disclosed in Section 3.5.3, these two partitions are not identical, so a portion of the 128,539-review test set overlaps data the fine-tuned model saw in training. The uncontaminated figure for that model is the one from its own held-out partition, and it is that figure which is treated as definitive. Every comparison in Section 4.5.1 involving DistilBERT is annotated accordingly.
+As disclosed in Section 3.5.1, these two partitions are not identical, so a portion of the 128,539-review test set overlaps data the fine-tuned model saw in training. The uncontaminated figure for that model is the one from its own held-out partition, and it is that figure which is treated as definitive. Every comparison in Section 4.5.1 involving DistilBERT is annotated accordingly.
 
 ---
 
@@ -111,40 +83,22 @@ Five models span four families, selected on the evidence reviewed in Section 2.3
 
 VADER serves as the lexicon baseline, requiring no training, with compound scores mapped to three classes at the conventional ±0.05 thresholds. Naive Bayes and logistic regression are trained over TF-IDF features, the latter using the lbfgs solver with `max_iter=3000`, with five-fold stratified cross-validation during development. RoBERTa is used pretrained and unmodified in its `twitter-roberta-base-sentiment-latest` form; it is deliberately not fine-tuned, since its role is to represent what transfer learning delivers without task-specific training.
 
-DistilBERT was fine-tuned from `distilbert-base-uncased` with a three-class head. Table 4.2 gives the configuration.
+DistilBERT was fine-tuned from `distilbert-base-uncased` with a three-class head. The full configuration is given in Appendix B.
 
-**Table 4.2** — DistilBERT fine-tuning configuration
-
-| Parameter | Value | Parameter | Value |
-|---|---|---|---|
-| Base model | `distilbert-base-uncased` | Warmup steps | 1,000 |
-| Split | 70/15/15, seed 42 | Weight decay | 0.01 |
-| Epochs | 4 (early stopping, patience 2) | Precision | fp16 |
-| Batch size | 32 train / 64 eval | Class weights | Balanced, weighted cross-entropy |
-| Learning rate | 2e-5 | Selection metric | Validation macro F1 |
 
 Two choices warrant note. Class weights were applied through a custom trainer overriding the loss function, because the standard trainer ignores them; without this the neutral class would be under-served despite corpus-level balance. And checkpoint selection used macro F1 rather than validation loss, so that the quantity optimised matches the quantity reported.
 
-Table 4.3 records training behaviour.
+Per-epoch training behaviour is reported in Appendix B.
 
-**Table 4.3** — DistilBERT validation performance by epoch
 
-| Epoch | Training loss | Validation loss | Accuracy | Weighted F1 | Macro F1 |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 0.2612 | 0.4482 | 83.48% | 83.51% | 82.59% |
-| 2 | 0.2810 | 0.3977 | **84.08%** | **84.13%** | **83.28%** |
-| 3 | 0.2355 | 0.4508 | 83.98% | 84.00% | 83.12% |
-| 4 | 0.2007 | 0.5225 | 83.73% | 83.71% | 82.80% |
+Validation loss fell to epoch 2 then rose while training loss continued to decline — the standard signature of overfitting — so best-checkpoint restoration selected epoch 2. Training took 10,545 seconds.
 
-Validation loss fell to epoch 2 then rose while training loss continued to decline, the standard signature of overfitting. Best-checkpoint restoration selected epoch 2. Training took 10,545 seconds with a final training loss of 0.3350.
-
-*(Figure 4.3 — DistilBERT training and validation loss with validation macro F1 across four epochs, marking the epoch-2 checkpoint selected by early stopping.)*
 
 ### 4.4.2 Complaint discovery
 
-BERTopic was applied to the negative-sentiment reviews of each platform separately, after English-language filtering. Running per platform rather than over the pooled corpus prevents Yelp's seventy per cent share from dominating the topic space. Table 4.4 records configuration and outcome.
+BERTopic was applied to the negative-sentiment reviews of each platform separately, after English-language filtering. Running per platform rather than over the pooled corpus prevents Yelp's seventy per cent share from dominating the topic space. Table 4.2 records configuration and outcome.
 
-**Table 4.4** — BERTopic discovery by platform *(source: `data/results/category_discovery/discovery_platform_topics.csv`)*
+**Table 4.2** — BERTopic discovery by platform *(source: `data/results/category_discovery/discovery_platform_topics.csv`)*
 
 | Platform | Documents clustered | Minimum topic size | Topics discovered |
 |---|---:|---:|---:|
@@ -157,17 +111,9 @@ Minimum topic size was derived from each platform's document count rather than f
 
 The 121 raw topics were then merged by agglomerative clustering over topic centroid embeddings to a target of 24 categories, each named by a language model given its constituent topic labels and keywords.
 
-### 4.4.3 Category assignment
+### 4.4.3 Category assignment, retrieval and question answering
 
-Individual reviews are assigned in two stages: an embedding comparison shortlists six candidate categories, then a zero-shot entailment model scores only that shortlist, using each category's full description as the hypothesis. A confidence threshold of 0.35 leaves weak matches unclassified instead of forcing a label, so that coverage failure remains visible in the results rather than being absorbed into a nearest-neighbour assignment.
-
-### 4.4.4 Retrieval and question answering
-
-The corpus was embedded with `all-MiniLM-L6-v2` and indexed in FAISS with normalised vectors carrying platform, rating, sentiment and review identifier as metadata. Retrieval returns five reviews per query from a candidate pool of twenty, using maximal marginal relevance.
-
-Each retrieved review enters the prompt tagged with its platform, rating and sentiment. The prompt forbids any statistic, category or quotation not present in the retrieved text, restricts platform references to those appearing in the evidence, and specifies a fixed refusal string when evidence is insufficient. Source identifiers are returned with every answer. Generation uses Llama 3.1 8B via Groq at temperature 0.2, with multi-turn support through a history-aware retriever that reformulates follow-up questions into standalone queries before retrieval.
-
-The same questions are answered by the model with retrieval disabled, providing the baseline for RQ2.
+Assignment, retrieval and generation were implemented as specified in Sections 3.6.2 and 3.6.3: a six-category embedding shortlist scored by zero-shot entailment with a 0.35 confidence threshold; FAISS retrieval of five reviews per query by maximal marginal relevance, each tagged with platform, rating and sentiment before entering the prompt; and generation by Llama 3.1 8B at temperature 0.2 with source identifiers returned. The same questions were then answered with retrieval disabled, providing the RQ2 baseline.
 
 ---
 
@@ -175,9 +121,9 @@ The same questions are answered by the model with retrieval disabled, providing 
 
 ### 4.5.1 Aggregate sentiment results
 
-Table 4.5 reports all five models on the shared test set.
+Table 4.3 reports all five models on the shared test set.
 
-**Table 4.5** — Sentiment classification results, shared held-out set (n = 128,539) *(source: `data/results/metrics_summary/overall_metrics.csv`)*
+**Table 4.3** — Sentiment classification results, shared held-out set (n = 128,539) *(source: `data/results/metrics_summary/overall_metrics.csv`)*
 
 | Model | Family | Accuracy | Balanced acc. | Macro P | Macro R | Macro F1 | Weighted F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -187,13 +133,12 @@ Table 4.5 reports all five models on the shared test set.
 | RoBERTa (pretrained) | Pretrained transformer | 0.6327 | 0.6314 | 0.6056 | 0.6314 | 0.5694 | 0.5709 |
 | DistilBERT (fine-tuned)† | Fine-tuned transformer | **0.8243** | **0.8245** | **0.8247** | **0.8245** | **0.8244** | **0.8244** |
 
-† Partially contaminated: a portion of this test set overlaps DistilBERT's training data (Section 4.3.3). The clean figure follows below.
+† Partially contaminated: a portion of this test set overlaps DistilBERT's training data (Section 4.3.2). The clean figure follows below.
 
 Balanced accuracy tracks accuracy closely for every model, confirming that the class balancing described in Section 4.2.3 worked: no model is benefiting from an uneven class prior.
 
 On its own uncontaminated held-out partition of 88,854 reviews, the fine-tuned model achieved accuracy 0.8437, macro F1 0.8375 and weighted F1 0.8454. This is the figure treated as definitive for DistilBERT throughout the remainder of this dissertation. Its closeness to the shared-set figure of 0.8244 suggests the contamination did not materially inflate the shared-set result, but the clean figure is used regardless, since the argument should not depend on that judgement.
 
-*(Figure 4.4 — Overall model performance: accuracy with macro-averaged precision, recall and F1 for all five models.)*
 
 Two results contradict the ordering the literature in Section 2.1.2 would predict.
 
@@ -203,59 +148,22 @@ The second is more consequential. The pretrained transformer falls below both cl
 
 ### 4.5.2 Per-class analysis
 
-The aggregates conceal where the failure occurs. Table 4.6 reports per-class performance, and this is the table that makes the anomaly legible.
+The aggregates conceal where the failure occurs. The full per-class report is given in Appendix B; the pattern it exposes is what makes the anomaly legible.
 
-**Table 4.6** — Per-class precision, recall and F1 by model, shared test set (n = 128,539) *(source: `data/results/metrics_summary/per_class_metrics.csv`)*
-
-| Model | Neg. P | Neg. R | Neg. F1 | Neu. P | Neu. R | Neu. F1 | Pos. P | Pos. R | Pos. F1 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| VADER | 0.743 | 0.533 | 0.621 | 0.377 | **0.048** | **0.086** | 0.444 | 0.963 | 0.608 |
-| Naive Bayes | 0.757 | 0.766 | 0.761 | 0.654 | 0.704 | 0.678 | 0.876 | 0.798 | 0.835 |
-| Logistic Regression | 0.818 | 0.830 | 0.824 | 0.721 | 0.715 | 0.718 | 0.871 | 0.864 | 0.868 |
-| RoBERTa (pretrained) | 0.684 | 0.814 | 0.743 | 0.522 | **0.143** | **0.225** | 0.612 | 0.937 | 0.740 |
-| DistilBERT (fine-tuned) | 0.856 | 0.820 | 0.837 | 0.740 | 0.755 | 0.747 | 0.879 | 0.899 | 0.889 |
 
 Both off-the-shelf models perform acceptably on negative and positive while collapsing on neutral, and separating precision from recall shows the nature of that collapse. VADER's neutral precision is 0.377 while its neutral recall is 0.048; RoBERTa's are 0.522 and 0.143. Precision is moderate in both cases and recall is near zero. Neither model is systematically wrong about what neutral text looks like when it does apply the label — both simply almost never apply it.
 
 A second pattern appears in the positive column. VADER records 0.963 recall against 0.444 precision, so it captures nearly every genuinely positive review while being wrong about most of what it calls positive. This is the systematic positive skew visible in the confusion matrices.
 
-*(Figure 4.2 — Row-normalised confusion matrices for all five models. Produced by `evaluate/generate_figures.py`; saved as `data/results/figures/fig_4_2_confusion_matrices.png`.)*
 
-*(Figure 4.5 — Precision, recall and F1 by sentiment class, one panel per class.)*
-
-Table 4.7 shows where the misclassified neutral reviews go, as row-normalised percentages.
-
-**Table 4.7** — Destination of true-neutral reviews, row-normalised *(source: `data/results/cm_*.json`)*
-
-| Model | → negative | → neutral | → positive |
-|---|---:|---:|---:|
-| VADER | 16.9% | 4.8% | 78.3% |
-| RoBERTa (pretrained) | 36.2% | 14.3% | 49.5% |
-| Logistic Regression | 17.3% | 71.5% | 11.2% |
-| DistilBERT (fine-tuned) | 13.3% | 75.5% | 11.3% |
-
-VADER assigns the neutral label to under five per cent of genuinely neutral reviews, pushing 78.3% to positive. RoBERTa splits them between both poles. Neither model fails uniformly; both behave as effectively binary classifiers confronted with a three-class task. VADER's skew extends further still: it labels 40.4% of genuinely negative reviews as positive.
+The destinations of misclassified neutral reviews, given in full in Appendix B, sharpen this. VADER assigns the neutral label to only 4.8% of genuinely neutral reviews, pushing 78.3% to positive; RoBERTa splits them between both poles, 36.2% negative and 49.5% positive. Neither fails uniformly — both behave as binary classifiers confronted with a three-class task. VADER's skew extends further: it labels 40.4% of genuinely negative reviews as positive.
 
 ### 4.5.3 Statistical significance of the differences
 
-A difference in macro F1 between two models is only meaningful if it exceeds what sampling variation would produce. McNemar's exact test was therefore applied to every pair of models. The test considers only the reviews on which two models disagree: under the null hypothesis that both are equally accurate, each disagreement is equally likely to favour either model, so an exact binomial test on the discordant counts gives the probability of observing the imbalance found.
+McNemar's exact test was applied to every model pair on the balanced diagnostic sample, since a difference in macro F1 is only meaningful if it exceeds what sampling variation would produce.
 
-**An important scope note.** The test requires paired per-review predictions, which the saved confusion matrices do not retain. It was therefore computed on the balanced diagnostic sample of 1,800 reviews described in Section 4.5.4, not on the full test set. The accuracies in Table 4.8 are consequently those observed on that sample and differ from Table 4.5; the test speaks to pairwise correctness on the balanced sample, and is not a direct significance test of the macro F1 differences reported in Table 4.5.
+**An important scope note.** The test requires paired per-review predictions, which the saved confusion matrices do not retain. It was therefore computed on the balanced diagnostic sample of 1,800 reviews described in Section 4.5.4, not on the full test set. The accuracies reported in Appendix B are consequently those observed on that sample and differ from Table 4.3; the test speaks to pairwise correctness on the balanced sample, and is not a direct significance test of the macro F1 differences reported in Table 4.3.
 
-**Table 4.8** — McNemar pairwise comparisons, balanced diagnostic sample (n = 1,800) *(source: `data/results/metrics_summary/significance_tests.csv`)*
-
-| Model A | Model B | A acc. | B acc. | Discordant pairs | p-value | Significant | Better |
-|---|---|---:|---:|---:|---:|---|---|
-| VADER | DistilBERT | 0.5539 | 0.8417 | 734 | 1.6 × 10⁻⁸⁹ | yes | DistilBERT |
-| VADER | Logistic Regression | 0.5539 | 0.7444 | 741 | 1.5 × 10⁻³⁷ | yes | Logistic Regression |
-| Naive Bayes | DistilBERT | 0.6983 | 0.8417 | 444 | 2.6 × 10⁻³⁶ | yes | DistilBERT |
-| VADER | RoBERTa | 0.5539 | 0.6944 | 429 | 3.2 × 10⁻³⁶ | yes | RoBERTa |
-| RoBERTa | DistilBERT | 0.6944 | 0.8417 | 505 | 2.1 × 10⁻³³ | yes | DistilBERT |
-| Logistic Regression | DistilBERT | 0.7444 | 0.8417 | 349 | 1.7 × 10⁻²¹ | yes | DistilBERT |
-| VADER | Naive Bayes | 0.5539 | 0.6983 | 764 | 3.0 × 10⁻²¹ | yes | Naive Bayes |
-| Naive Bayes | Logistic Regression | 0.6983 | 0.7444 | 295 | 1.6 × 10⁻⁶ | yes | Logistic Regression |
-| Logistic Regression | RoBERTa | 0.7444 | 0.6944 | 596 | 2.6 × 10⁻⁴ | yes | Logistic Regression |
-| **Naive Bayes** | **RoBERTa** | **0.6983** | **0.6944** | **675** | **0.82** | **no** | **—** |
 
 Nine of the ten comparisons are significant at p < 0.05, most by very wide margins. Two deserve specific note.
 
@@ -263,15 +171,14 @@ The gap between DistilBERT and logistic regression is significant at p = 1.7 × 
 
 Naive Bayes and RoBERTa, by contrast, cannot be separated. Of the 675 reviews on which they disagree, each is correct on almost exactly half, giving p = 0.82. This does not establish that the two models are equivalent — a non-significant result is not evidence of equality — but the available paired evidence does not support ranking either above the other on this sample, despite RoBERTa being a transformer and Naive Bayes a bag-of-words classifier from a much earlier generation of methods.
 
-*(Figure 4.6 — Pairwise significance of model differences under McNemar's exact test, n = 1,800.)*
 
-### 4.5.4 Diagnostic experiments
+### 4.5.4 Error analysis and diagnostic experiments
 
-Three diagnostic experiments test the mechanism behind these results, using a balanced sample of 1,800 reviews drawn equally across platform and class so that no platform dominates. Because the sample is balanced rather than representative, the three-class figures in this section differ from Table 4.5 and should be compared only within the section.
+Three diagnostic experiments test the mechanism behind these results, using a balanced sample of 1,800 reviews drawn equally across platform and class so that no platform dominates. Because the sample is balanced rather than representative, the three-class figures in this section differ from Table 4.3 and should be compared only within the section. A qualitative inspection of individual misclassified reviews follows the three experiments.
 
-**Per-platform performance.** Table 4.9 reports macro F1 and neutral F1 for every model on each platform.
+**Per-platform performance.**
 
-**Table 4.9** — Macro F1 (neutral F1 in parentheses) by platform, 600 reviews per platform *(source: `data/results/sentiment_diagnostics/per_platform_metrics.csv`)*
+**Table 4.4** — Macro F1 (neutral F1 in parentheses) by platform, 600 reviews per platform *(source: `data/results/sentiment_diagnostics/per_platform_metrics.csv`)*
 
 | Model | Amazon | Yelp | Twitter Airline |
 |---|---:|---:|---:|
@@ -281,15 +188,11 @@ Three diagnostic experiments test the mechanism behind these results, using a ba
 | RoBERTa (pretrained) | 0.6218 (0.302) | 0.5544 (0.198) | **0.7853 (0.713)** |
 | DistilBERT (fine-tuned) | 0.8448 (0.782) | 0.8301 (0.748) | 0.8505 (0.836) |
 
-The result is decisive. RoBERTa scores 0.7853 on Twitter Airline against 0.5544 on Yelp, a spread of 23 points, and its neutral F1 moves from 0.713 on Twitter to 0.198 on Yelp. On Twitter it also **outperforms both classical models**, beating logistic regression by 14 points and Naive Bayes by 30. The ranking of methods reverses depending on which platform is used to produce it.
+The result is decisive. RoBERTa scores 0.7853 on Twitter Airline against 0.5544 on Yelp — a spread of 23 points, with neutral F1 moving from 0.713 to 0.198 — and on Twitter it **outperforms both classical models**, beating logistic regression by 14 points. Naive Bayes shows the mirror pattern, 0.7952 on Amazon collapsing to 0.4838 on Twitter. The ranking reverses depending on which platform produces it. Only the fine-tuned model is stable across all three, with a spread of two points.
 
-Naive Bayes shows the mirror-image pattern, scoring 0.7952 on Amazon but collapsing to 0.4838 on Twitter. Only the fine-tuned model is stable across all three platforms, with a spread of two points.
+**Binary re-evaluation.** Removing the neutral class and forcing a choice between negative and positive from each model's own class scores gives the following.
 
-*(Figure 4.7 — Per-platform macro F1 by model, grouped bars, n = 600 per platform.)*
-
-**Binary re-evaluation.** Table 4.10 removes the neutral class. The forced-binary column requires each model to choose between negative and positive using its own class scores.
-
-**Table 4.10** — Effect of removing the neutral class, diagnostic sample *(source: `data/results/sentiment_diagnostics/binary_comparison.csv`)*
+**Table 4.5** — Effect of removing the neutral class, diagnostic sample *(source: `data/results/sentiment_diagnostics/binary_comparison.csv`)*
 
 | Model | Three-class macro F1 | Binary macro F1 (forced) | Gain |
 |---|---:|---:|---:|
@@ -299,29 +202,18 @@ Naive Bayes shows the mirror-image pattern, scoring 0.7952 on Amazon but collaps
 | Logistic Regression | 0.7449 | 0.9216 | +0.1766 |
 | DistilBERT (fine-tuned) | 0.8426 | 0.9533 | +0.1107 |
 
-The two off-the-shelf models gain most from removing neutral, and the ordering of the gains is itself the pattern: the more a model depends on task-specific training, the less it gains. RoBERTa's binary macro F1 of 0.9341 exceeds logistic regression's 0.9216, so once the neutral class is removed the ranking implied by the literature is restored.
+The ordering of the gains is itself the pattern: the more a model depends on task-specific training, the less it gains from removing neutral. RoBERTa's binary macro F1 of 0.9341 exceeds logistic regression's 0.9216, so once the class is removed the ranking implied by the literature is restored.
 
-*(Figure 4.8 — Three-class against forced-binary macro F1 by model.)*
+**VADER threshold sensitivity.** Widening the neutral band from the default ±0.05 raises macro F1 from 0.5094 to a maximum of 0.5353 at ±0.25, with neutral F1 rising from 0.253 to 0.349, after which macro F1 declines as the band swallows genuinely polar reviews. The full sweep is in Appendix B. The improvement is real but modest — 0.026 macro F1 at the optimum — so threshold choice explains part of VADER's weakness on the neutral class, not most of it.
 
-**VADER threshold sensitivity.** Widening VADER's neutral band from the default ±0.05 raises macro F1 from 0.5094 to a maximum of 0.5353 at ±0.25, with neutral F1 rising from 0.253 to 0.349 and the proportion of reviews predicted neutral rising from 10.2% to 18.9%. Beyond ±0.25 macro F1 declines again. Table 4.11 gives the sweep.
 
-**Table 4.11** — VADER neutral-band sweep, diagnostic sample *(source: `data/results/sentiment_diagnostics/vader_threshold_sweep.csv`)*
+**Qualitative error analysis.** The three experiments establish *where* errors concentrate but not what they look like, so individual misclassified reviews were inspected by joining the cached per-review predictions back to the source text (`evaluate/extract_error_examples.py`). Three patterns account for most failures, each corresponding to one of the quantitative findings above. Representative examples are reproduced verbatim in Appendix B.
 
-| Neutral band | Accuracy | Macro F1 | Neutral F1 | Predicted neutral (%) |
-|---:|---:|---:|---:|---:|
-| ±0.05 (default) | 0.5539 | 0.5094 | 0.2526 | 10.2 |
-| ±0.10 | 0.5567 | 0.5179 | 0.2812 | 12.1 |
-| ±0.15 | 0.5594 | 0.5258 | 0.3075 | 14.0 |
-| ±0.20 | **0.5628** | 0.5332 | 0.3311 | 16.3 |
-| ±0.25 | 0.5606 | **0.5353** | 0.3486 | 18.9 |
-| ±0.30 | 0.5561 | 0.5335 | 0.3638 | 21.9 |
-| ±0.40 | 0.5478 | 0.5297 | 0.3909 | 27.5 |
-| ±0.50 | 0.5406 | 0.5259 | 0.4413 | 37.2 |
-| ±0.60 | 0.5272 | 0.5099 | 0.4649 | 44.3 |
+*Pattern 1 — mixed evaluative content in three-star reviews.* Of the 600 true-neutral reviews in the balanced sample, 300 were assigned a polar label by RoBERTa while the fine-tuned model assigned neutral correctly. These are not uninformative texts but reviews carrying clear praise and clear criticism together, where a three-star rating encodes a net judgement across both clauses. This is the concrete form of the label-definition mismatch that Section 5.1.1 argues explains RoBERTa's neutral-class collapse.
 
-The improvement is real but modest: a gain of 0.026 macro F1 at the optimum. Threshold choice explains part of VADER's weakness on the neutral class, not most of it.
+*Pattern 2 — positive vocabulary in negative reviews.* VADER assigns positive compound scores to one-star reviews whose complaint is carried by temporal or concessive contrast rather than negative words. These errors sit confidently on the wrong side of the boundary rather than near it, which is why widening the neutral band recovers so little.
 
-*(Figure 4.9 — VADER macro F1, neutral F1 and accuracy across neutral-band widths, marking the ±0.25 optimum. All three diagnostic figures produced by `evaluate/evaluate_sentiment_diagnostics.py`.)*
+*Pattern 3 — the labelling ceiling.* A residual group is misclassified by all five models. Inspection shows reviews whose rating and text genuinely diverge, which is the ceiling imposed by rating-derived labelling rather than a modelling failure — the constraint recorded in Section 3.2.2 appearing in the data.
 
 ### 4.5.5 Taxonomy evaluation
 
@@ -329,9 +221,9 @@ Two distinct measures are used and should not be confused. *Centroid separation*
 
 The merged taxonomy has a centroid separation of **0.2831** across its 24 categories, indicating well-separated categories. Had the 121 raw topics merged into 24 groups that still overlapped heavily, the consolidation would have been a relabelling exercise rather than a genuine reduction.
 
-Applying the taxonomy to a held-out stratified sample of 450 reviews, 150 per platform, gives Table 4.12.
+Applying the taxonomy to a held-out stratified sample of 450 reviews, 150 per platform, gives Table 4.6.
 
-**Table 4.12** — Taxonomy evaluation on held-out data (n = 450) *(source: `data/results/category_discovery/evaluation_summary.csv`, `category_frequency.csv`)*
+**Table 4.6** — Taxonomy evaluation on held-out data (n = 450) *(source: `data/results/category_discovery/evaluation_summary.csv`, `category_frequency.csv`)*
 
 | Measure | Value |
 |---|---|
@@ -344,19 +236,8 @@ Applying the taxonomy to a held-out stratified sample of 450 reviews, 150 per pl
 
 Two categories between them absorb 251 of 450 reviews (55.8%): the largest substantive category and the unclassified bucket. The remaining 199 reviews are distributed across 20 categories, three of which hold a single review.
 
-Coherence varies systematically with category size, and the relationship is inverse. Table 4.13 gives representative values.
+Coherence varies systematically with category size, and the relationship is inverse; representative values are given in Appendix B.
 
-**Table 4.13** — Within-category coherence against category size, selected categories *(source: `data/results/category_discovery/category_coherence.csv`)*
-
-| Category | Reviews | Mean coherence |
-|---|---:|---:|
-| Travel Disruption Issues | 11 | 0.6763 |
-| Home Network Connectivity Issues | 7 | 0.6410 |
-| Service and Wait Time Delays | 35 | 0.5678 |
-| Audio Performance Failures | 22 | 0.5546 |
-| Product Fit and Sizing Issues | 25 | 0.4079 |
-| Product Performance Failures | 127 | 0.3997 |
-| Unclassified / Emerging Complaint | 124 | 0.3767 |
 
 The three categories holding a single review each score 1.0, which is an artefact of measuring a review's similarity to a centroid it alone defines, not a quality signal. These are excluded from interpretation.
 
@@ -368,11 +249,19 @@ One category retained an un-renamed raw BERTopic label: "Spray Bottle, Continuou
 
 The sentiment breakdown shows the taxonomy assigning positive reviews to complaint categories. That same mis-named category received 19 positive reviews and zero negative; the unclassified group holds 60 positive against 34 negative. The taxonomy was built from negative reviews only and has no mechanism for rejecting non-complaints, so any review presented to it is assigned somewhere or left unclassified regardless of whether it expresses a complaint at all.
 
-*(Figure 4.10 — Category frequency distribution. Figure 4.11 — Platform distribution by category. Figure 4.12 — Sentiment distribution by category, showing positive reviews assigned to complaint categories. Figure 4.13 — Mean within-category coherence against category size. All produced by `evaluate/evaluate_category_discovery.py`.)*
+![Figure 4.2](../data/results/category_discovery/category_frequency.png){width=4.6in}
+
+**Figure 4.2** — Category frequency on the held-out sample (n = 450). Two categories account for 55.8% of assignments; three hold a single review each.
+
+
+![Figure 4.3](../data/results/category_discovery/sentiment_by_category.png){width=4.6in}
+
+**Figure 4.3** — Sentiment composition of each category. Several complaint categories contain predominantly positive reviews — the defect discussed above.
+
 
 ### 4.5.6 Retrieval evaluation
 
-**Table 4.14** — Retrieval comparison, 30 queries over 642,692 indexed reviews *(source: `data/results/comparison_embedding_models/retrieval_comparison.csv`)*
+**Table 4.7** — Retrieval comparison, 30 queries over 642,692 indexed reviews *(source: `data/results/comparison_embedding_models/retrieval_comparison.csv`)*
 
 | Metric | Semantic (MiniLM + FAISS) | TF-IDF |
 |---|---:|---:|
@@ -386,53 +275,84 @@ Dense retrieval is roughly 5.9 times faster, and its latency is also more variab
 
 Two cautions apply. The similarity scores are not comparable across methods, since cosine similarity over dense embeddings and over sparse TF-IDF vectors measure different quantities; the higher dense figure should not be read as better retrieval. And with 30 queries the comparison is small enough that a modest precision difference could pass undetected. On this evidence the case for dense retrieval rests on latency, not on retrieval quality.
 
-*(Figure 4.14 — Retrieval latency and Precision@3, semantic against TF-IDF, n = 30 queries.)*
 
 ### 4.5.7 Generation evaluation
 
-Table 4.15 compares the retrieval-augmented pipeline against the standalone baseline on the same five questions, with the same generator, temperature and prompt structure.
+Table 4.8 compares the retrieval-augmented pipeline against the standalone baseline on the same five questions, with the same generator, temperature and prompt structure. These figures were regenerated after a hard grounding threshold (`SIMILARITY_THRESHOLD = 0.35`, `rag/pipeline.py`) was added to the retriever, which discards a question outright — returning a fixed refusal rather than an answer — when nothing retrieved clears the threshold. An earlier run of the same script, before that threshold existed, produced higher aggregate scores; those figures are superseded and are not reported here, since they describe a pipeline configuration that is no longer the one in `rag/pipeline.py`. Section 4.6 describes the guard; this section is the evaluation of the system with it in place. One caveat belongs here rather than buried in a footnote: as the per-question data below shows, the threshold itself was not what produced the one refusal observed in this sample — a separate part of the pipeline was responsible, and the difference matters enough to walk through properly rather than gloss over.
 
-**Table 4.15** — RAG against standalone LLM (n = 5 questions) *(source: `data/results/llm_vs_rag/overall_results.csv`, `comparison_summary.csv`)*
+**Table 4.8** — RAG against standalone LLM (n = 5 questions) *(source: `data/results/llm_vs_rag/overall_results.csv`, `comparison_summary.csv`)*
 
 | Metric | RAG pipeline | Standalone LLM |
 |---|---:|---:|
-| Faithfulness | 0.849 | not computable |
-| Answer relevancy | 0.671 | **0.751** |
-| Context precision | 0.503 | not applicable |
-| Context recall | 0.800 | not applicable |
-| Mean latency | 2,022.6 ms | 669.6 ms |
-| Mean retrieved reviews | 5.0 | 0 |
+| Faithfulness | 0.540 | not computable |
+| Answer relevancy | 0.610 | **0.753** |
+| Context precision | 0.416 | not applicable |
+| Context recall | 0.400 | not applicable |
+| Mean latency | 1,582.7 ms | 734.0 ms |
+| Mean retrieved reviews | 3.4 | 0 |
 
 Faithfulness cannot be computed for the standalone condition because the metric measures whether an answer follows from retrieved context, and no context exists. That absence is itself the finding: the baseline produces answers with no verifiable evidential basis, so the property the pipeline exists to provide is undefined for the alternative.
 
-On the two metrics that can be compared, the standalone model scored higher on answer relevancy — 0.751 against 0.671 — while taking roughly a third of the time. Unconstrained generation produced answers judged more responsive while resting on nothing checkable.
+On the two metrics that can be compared, the standalone model scored higher on answer relevancy — 0.753 against 0.610 — while taking under half the time. Mean retrieved reviews falls to 3.4 because one question returns zero reviews (rejected before retrieval by the scope guard, not the grounding threshold — see the note under Table 4.9) and another returns only two, rather than the fixed five the earlier, un-gated retriever always returned.
 
-**Per-question variance is severe, and the aggregate means conceal a pattern that reverses part of this reading.** Table 4.16 gives the full per-question breakdown.
+**Per-question variance is severe, and the aggregate means conceal a pattern that reverses part of this reading.** Table 4.9 gives the full per-question breakdown.
 
-**Table 4.16** — Per-question RAGAS scores (n = 5) *(source: `data/results/llm_vs_rag/rag_ragas_scores.csv`, `llm_ragas_scores.csv`)*
+**Table 4.9** — Per-question RAGAS scores (n = 5) *(source: `data/results/llm_vs_rag/rag_ragas_scores.csv`, `llm_ragas_scores.csv`)*
 
 | Question | RAG faithfulness | RAG relevancy | RAG context precision | RAG context recall | LLM relevancy |
 |---|---:|---:|---:|---:|---:|
-| Why are customers unhappy with battery life? | 1.000 | 0.743 | 0.250 | 1.000 | 0.988 |
-| What delivery problems are customers reporting? | 0.917 | 0.728 | 0.867 | 1.000 | **0.000** |
-| Why are airline passengers dissatisfied? | 0.917 | 0.579 | **0.000** | 1.000 | 0.961 |
-| What customer service issues appear most often? | 0.625 | 0.570 | 0.700 | 1.000 | 0.952 |
-| Summarise the major customer complaints. | 0.786 | 0.737 | 0.700 | **0.000** | 0.853 |
-| **Mean** | **0.849** | **0.671** | **0.503** | **0.800** | **0.751** |
+| Why are customers unhappy with battery life? | 0.417 | 0.442 | 0.325 | 1.000 | 0.988 |
+| What delivery problems are customers reporting? | 1.000 | 0.740 | 0.756 | 1.000 | **0.000** |
+| Why are airline passengers dissatisfied? | 0.400 | n/a¹ | **0.000** | **0.000** | 0.961 |
+| What customer service issues appear most often? | **0.000**² | 0.437 | **0.000**² | **0.000**² | 0.964 |
+| Summarise the major customer complaints. | 0.882 | 0.819 | 1.000 | **0.000** | 0.853 |
+| **Mean** | **0.540** | **0.610**¹ | **0.416** | **0.400** | **0.753** |
 
-Three observations follow directly from the table, and are recorded here as evidence rather than interpretation.
+¹ The RAGAS judge raised an `OutputParserException` while scoring this question's answer relevancy — the free-tier judge model returned prose instead of the expected structured output — so no score exists for that cell. The reported mean is computed over the remaining four questions, not five, which narrows an already small sample further. This is a concrete instance of the judge-model risk discussed in Section 5.3.4.
 
-The standalone model's relevancy advantage rests entirely on one anomalous score. Its per-question relevancy is 0.988, 0.000, 0.961, 0.952 and 0.853 — four high scores and one complete failure on the delivery question. Excluding that single zero would raise its mean to approximately 0.938; including it gives 0.751. The RAG pipeline's relevancy, by contrast, ranges only from 0.570 to 0.743, a spread of 0.17 against the baseline's 0.99.
+² This one needs unpacking rather than a one-line note, because the obvious explanation turns out to be the wrong one. It's tempting to read this row as the grounding threshold doing its job — no evidence, so no answer — but the text returned doesn't say that. It matches `OUT_OF_SCOPE_MSG` verbatim, the message the pipeline's *scope guard* returns, not `NO_EVIDENCE_MSG`, the message the similarity threshold returns. That distinction matters: the scope guard runs first, before retrieval is even attempted, so this question never reached the grounding mechanism at all. Somewhere in the two-stage guard — most likely its LLM classifier, since the keyword list doesn't contain anything this question would trigger — "What customer service issues appear most often?" was judged out of scope. It plainly isn't; this is a legitimate complaint-exploration question of exactly the kind the system is built to answer. The same rejection, identical wording, recurred in both conditions of the metadata-tagging ablation described in Section 4.5.8, which rules out coincidence and points to a real, reproducible weak spot in the scope classifier rather than a one-off fluke. Faithfulness, context precision and context recall are mechanically zero here because no retrieval or generation ever happened for this question — not because the pipeline judged its own evidence insufficient.
 
-Retrieval quality is the pipeline's weakest measured component. Context precision ranges from 0.000 to 0.867 with a mean of 0.503, and one question retrieved no relevant context at all by this measure while still producing an answer scored 0.917 on faithfulness and 0.579 on relevancy.
+Four observations follow directly from the table, and are recorded here as evidence rather than interpretation.
 
-Context recall is 1.000 on four of five questions and 0.000 on the fifth, the open-ended summarisation question — the only question in the set without a specific topic to retrieve against.
+The standalone model's relevancy advantage is driven by the same single anomalous score as before. Its per-question relevancy is 0.988, 0.000, 0.961, 0.964 and 0.853 — four high scores and one complete failure on the delivery question. Excluding that single zero would raise its mean to approximately 0.941; including it gives 0.753. The RAG pipeline's four scored questions range from 0.437 to 0.819, a spread of 0.38 — wider than the earlier, un-gated run, but still narrower than the baseline's spread of 0.99.
 
-Two constraints qualify all of these figures. Sample size follows from free-tier API rate limits, which capped the available evaluation call volume; with n = 5 the means carry very wide uncertainty and no confidence interval is reported because none would be meaningful at this sample size. And the model judging the answers is the model that generated them, so the self-enhancement bias documented in Section 2.1.2 applies — though that bias would act to inflate the pipeline's scores rather than the baseline's, so it cannot explain the relevancy result.
+The false rejection on the customer-service question is the most consequential single result in this table, but it credits the wrong mechanism if read carelessly. It is not the grounding threshold working as designed — no retrieval was even attempted — it's the scope guard misfiring on a question it should have passed straight through. The practical effect looks similar to a deliberate refusal (no answer, rather than a possibly wrong one), which limits the damage, but the cause is different, and Section 4.5.8's ablation results depend on getting this distinction right rather than folding it into the grounding-threshold story. It also mechanically depresses three of the four aggregate metrics for this question, since a rejection scores zero on faithfulness, context precision and context recall by construction, the same way a grounding refusal would.
 
-*(Figure 4.15 — RAG against standalone LLM: answer relevancy per question, and mean latency. Produced by `evaluate/evaluate_llm_vs_rag.py`.)*
+Retrieval quality is still the pipeline's weakest measured component among the questions that actually reached it. Context precision fell to zero on two of five questions — airline and, by construction, the rejected customer-service question — and on the airline question, faithfulness fell with it, to 0.400, rather than remaining high as it did in the earlier, un-gated run, where a zero-precision question still produced an answer scored 0.917 on faithfulness. That's a genuine improvement: the pipeline no longer generates a confident, well-formed answer from evidence its own retrieval judged irrelevant. Whether the grounding threshold itself deserves the credit for that, though, is a separate question from whether the scope guard behaved correctly, and this sample doesn't actually contain a case of the threshold refusing a question with retrieved-but-irrelevant evidence — that's a gap worth flagging for a future, larger evaluation, not something this table can settle either way.
 
-**A note on evaluation scope.** The ablation suite covering retrieval depth, retriever type, prompt version and metadata tagging was implemented but not executed, for the reasons given in Section 3.6.6. No ablation results are reported anywhere in this chapter, and the contribution of individual retrieval design decisions is therefore argued in Chapter 3 from design reasoning rather than measured here.
+Context recall is now 0.000 on three of five questions and 1.000 on the remaining two, and the three zero cases have different causes that should not be collapsed into one. On the summarisation question it repeats the earlier finding — an open-ended request with no specific topic to retrieve against, a structural limitation of similarity-based retrieval rather than a tuning failure. On the airline question it reflects genuinely thin retrieval: only two reviews cleared the threshold, and neither covers the reference answer's specific topics (delays, cancellations, lost luggage). On the customer-service question it is the mechanical consequence of the scope guard's false rejection, not of anything retrieval did.
+
+Three constraints qualify all of these figures. Sample size follows from free-tier API rate limits, which capped the available evaluation call volume; with n = 5 (n = 4 for relevancy) the means carry very wide uncertainty and no confidence interval is reported because none would be meaningful at this sample size. The judge model is the model that generated the answers, so the self-enhancement bias documented in Section 2.1.2 applies — though that bias would act to inflate the pipeline's scores rather than the baseline's, so it cannot explain the relevancy result. And the judge's own output failed to parse on one question, discussed above, which is itself evidence for that same judge-reliability concern rather than a separate issue.
+
+
+**A note on evaluation scope.** Four ablation conditions were designed for the retrieval stage (Section 3.6.5). Three of them — retrieval depth, retriever type and prompt version — were specified but never built, so the contribution of those design decisions is still argued from reasoning rather than measured. The fourth, metadata tagging, was built and run, and Section 4.5.8 reports what it found.
+
+### 4.5.8 Ablation: does metadata tagging actually help?
+
+Section 3's design chapter argues that tagging each retrieved review with its platform, rating and sentiment before it reaches the generator (`DOCUMENT_PROMPT` in `rag/pipeline.py`) is what makes `RAG_PROMPT`'s grounding rules enforceable rather than aspirational. Until now that was a claim defended by reasoning, not evidence. `evaluate/ablation_metadata_tagging.py` tests it directly: the same five questions, run twice through the same pipeline, once with the tags left in place and once with them stripped so the generator sees only the raw review text. Retrieval is identical in both runs — same threshold, same MMR selection — so any difference in the RAGAS scores can only come from what the generator was shown, not from what was retrieved.
+
+**Table 4.10** — Metadata tagging ablation (n = 5 questions) *(source: `data/results/ablation_metadata_tagging/comparison_summary.csv`)*
+
+| Metric | Tagged | Untagged | Delta |
+|---|---:|---:|---:|
+| Faithfulness | 0.667 | 0.549 | **+0.118** |
+| Answer relevancy | 0.452 | 0.654 | **−0.202** |
+| Context precision | 0.416 | 0.416 | 0.000 |
+| Context recall | 0.400 | 0.400 | 0.000 |
+
+The clean part of the result first: context precision and context recall are identical, to three decimal places, between conditions. That's exactly what the design predicts, since neither condition touches retrieval, and it's reassuring in a small way — it confirms the ablation is actually isolating what it claims to isolate, rather than some confound in how the two runs were set up.
+
+The interesting part is that tagging doesn't win cleanly. Faithfulness goes up with tags, by a solid margin — 0.667 against 0.549 — which does support the argument that citing each review's platform and rating gives the model something concrete to stay anchored to. But answer relevancy goes the other way, and by more: 0.452 tagged against 0.654 untagged, a drop of 0.202. That's not a rounding artefact; it's the largest single delta in the table. A plausible explanation is that the tagged answers spend more of their length on citation-style attribution — "(Yelp, Rating: 1.0, Sentiment: negative)" — while the untagged answers read more like a direct response to the question, which is closer to what an answer-relevancy judge is actually scoring. If that's right, the tagging design buys grounding at a real cost to how responsive the answer feels, and the honest conclusion is a trade-off rather than a validation.
+
+One concrete example is worth quoting directly, because it's exactly the failure mode the tagging is meant to prevent, caught in the act. For the battery-life question, the untagged run's answer opens with "Platform(s) covered: Twitter Airline, Amazon" — but none of the five retrieved reviews for that question mention an airline; they're about product batteries and an in-store replacement service, plausibly Amazon and Yelp. The tagged run's answer for the same question and the same retrieved reviews says "Platform(s) covered: Yelp, Amazon," which matches what was actually retrieved. That's a real, observed instance of `RAG_PROMPT` rule 3 — never reference a platform absent from the retrieved reviews — being violated without the tags and respected with them. It's one example, not a pattern established across many questions, but it's the kind of concrete evidence the design argument in Section 3 didn't have before this ablation ran.
+
+The latency figures (1,704.6 ms tagged against 501.3 ms untagged) are reported for completeness but shouldn't be read as an effect of tagging itself — the two conditions ran as separate sequential API calls to the same free-tier Groq endpoint, and a gap this large is more consistent with ordinary variance in queueing and network latency between calls than with tag text meaningfully changing generation time. No claim rests on it.
+
+Taken together: this is the one piece of the planned ablation suite that got measured rather than argued, and it converts a two-line design justification into a genuine, if narrow, empirical finding — metadata tagging measurably improves faithfulness and produces at least one avoided platform hallucination, at a measurable cost to answer relevancy. The other three planned conditions (retrieval depth, retriever type, prompt version) remain unexecuted, and this single result should not be read as standing in for them.
+
+![Figure 4.4](../data/results/ablation_metadata_tagging/metadata_tagging_ablation.png){width=4.6in}
+
+**Figure 4.4** — Metadata-tagging ablation: tagged against untagged RAGAS scores across all four metrics. Context precision and recall are identical by construction; faithfulness and answer relevancy move in opposite directions. *(Produced by `evaluate/ablation_metadata_tagging.py`.)*
 
 ---
 
@@ -454,6 +374,6 @@ The diagnostic experiments established where the anomaly comes from. RoBERTa's m
 
 Complaint discovery produced 121 raw topics consolidated into 24 well-separated categories at 0.2831 centroid separation. Applied to held-out data the taxonomy used 21 of them, achieved 0.6334 mean within-category coherence, and left 27.6% of reviews unclassified. Two categories absorbed 55.8% of the sample between them. Three defects were recorded: a catch-all largest category with low internal coherence, a failed language-model naming step leaving a raw topic label in the taxonomy, and no mechanism for rejecting non-complaints, with positive reviews assigned to complaint categories.
 
-Retrieval showed dense embeddings to be 5.9 times faster than TF-IDF at identical Precision@3 of 0.90. On five questions the retrieval-augmented pipeline achieved 0.849 faithfulness and 0.503 context precision, while the standalone baseline scored higher on mean answer relevancy, 0.751 against 0.671, despite having no evidence to be faithful to — an advantage that rests entirely on a single anomalous score in a set of five and disappears in consistency terms, since the baseline's per-question relevancy spans 0.99 against the pipeline's 0.17.
+Retrieval showed dense embeddings to be 5.9 times faster than TF-IDF at identical Precision@3 of 0.90. On five questions the retrieval-augmented pipeline, evaluated with a hard grounding threshold in place, achieved 0.540 faithfulness and 0.416 context precision, while the standalone baseline scored higher on mean answer relevancy, 0.753 against 0.610, despite having no evidence to be faithful to — an advantage that rests substantially on a single anomalous score in a set of five and is smaller in consistency terms, since the baseline's per-question relevancy spans 0.99 against the pipeline's 0.38. One question in this sample went unanswered, but tracing it back showed the grounding threshold wasn't actually responsible: the scope guard rejected it before retrieval ran, a false positive rather than the threshold correctly declining insufficient evidence. A separate, executed ablation on metadata tagging (Section 4.5.8) found a genuine trade-off rather than a clean win — tagging lifted faithfulness by 0.118 and cost 0.202 on answer relevancy, with one directly observed case of a platform hallucination it prevented.
 
 Chapter 5 interprets these results against the four research questions and the literature reviewed in Chapter 2.

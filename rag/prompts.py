@@ -154,9 +154,10 @@ def is_complaint_question_llm(question: str, llm: Optional[Any] = None) -> bool:
     stricter guard:
         from rag.prompts import is_complaint_question_llm as is_complaint_question
     """
-    from rag.pipeline import _get_llm  # local import: avoids a circular import
-                                        # with pipeline.py, which imports from
-                                        # this module at load time.
+    from rag.pipeline import _get_llm, _invoke_with_retry  # local import: avoids
+                                        # a circular import with pipeline.py,
+                                        # which imports from this module at
+                                        # load time.
 
     llm = llm or _get_llm()
     if llm is None:
@@ -164,7 +165,9 @@ def is_complaint_question_llm(question: str, llm: Optional[Any] = None) -> bool:
 
     try:
         prompt_text = SCOPE_CLASSIFIER_PROMPT.format(question=question)
-        response = llm.invoke(prompt_text)
+        # _invoke_with_retry absorbs a brief Groq rate limit here instead of
+        # immediately falling back to the coarser keyword-only guard below.
+        response = _invoke_with_retry(llm.invoke, prompt_text)
         text = getattr(response, "content", str(response)).strip().upper()
         return text.startswith("YES")
     except Exception:

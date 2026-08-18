@@ -26,11 +26,23 @@ COPY .streamlit/ ./.streamlit/
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    API_URL=http://backend:8000
+    API_URL=http://backend:8000 \
+    PORT=8501
 
 EXPOSE 8501
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+    CMD curl -f http://localhost:${PORT}/_stcore/health || exit 1
 
-CMD ["streamlit", "run", "frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Shell form so $PORT expands — see the same note in backend/Dockerfile.
+#
+# --server.headless skips the "enter your email" prompt Streamlit shows on
+# first run, which otherwise blocks startup in a container. XSRF protection
+# is disabled because it depends on cookies that don't survive a proxy
+# terminating TLS in front of the app; there are no state-changing forms
+# here, every action goes to the backend over HTTP with an API key.
+CMD exec streamlit run frontend/app.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableXsrfProtection=false

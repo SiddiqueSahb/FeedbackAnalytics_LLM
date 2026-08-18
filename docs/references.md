@@ -156,14 +156,19 @@ https://doi.org/10.1177/14413582251399667
 Areshey, A., & Mathkour, H. (2023). Transfer learning for sentiment classification using
 bidirectional encoder representations from transformers (BERT) model. *Sensors, 23*(11), 5232.
 https://doi.org/10.3390/s23115232
-> This is the source of the Yelp binary-polarity benchmark figures quoted in Chapter 5,
-> Table 5.1. **Note the year is 2023, not 2024** — correct the in-text citation.
+> **No longer cited.** This paper applies BERT with KNN/NB/SVM classifiers to Yelp reviews; it is
+> not the five-model transformer comparison the Chapter 5 benchmark row described, so the
+> attribution was corrected to the 2024 paper below. Retained here as a record of the correction.
 
 Areshey, A., & Mathkour, H. (2024). Exploring transformer models for sentiment classification:
 A comparison of BERT, RoBERTa, ALBERT, DistilBERT, and XLNet. *Expert Systems*.
 https://doi.org/10.1111/exsy.13701
-> A second, later paper by the same authors. Useful additional breadth for Section 2.1.2;
-> check which of the two you actually intend to cite in each place.
+> **Now the cited paper** in Chapter 5, Table 5.1 and §5.4.2. This is the study that compares
+> BERT, RoBERTa, ALBERT, DistilBERT and XLNet on binary sentiment, which is what the benchmark row
+> describes. Note that the specific per-model percentages previously quoted (RoBERTa 98.30%, BERT
+> 97.40%, DistilBERT 96.00%) **could not be confirmed against either paper** and have been
+> removed; §5.4.2 now makes the task-difference argument using this study's own binary
+> re-evaluation instead, which is internally verifiable.
 
 **RAG evaluation and LLM-as-judge**
 
@@ -191,9 +196,80 @@ A comprehensive survey on LLM-based evaluation methods* (arXiv:2412.05579). arXi
 https://arxiv.org/abs/2412.05579
 > Resolves **[V16]**. Load-bearing, as above.
 
+Ogunleye, B., Maswera, T., Hirsch, L., Gaudoin, J., & Brunsdon, T. (2023). Comparison of topic
+modelling approaches in the banking context. *Applied Sciences, 13*(2), 797.
+https://doi.org/10.3390/app13020797
+> Added during the citation audit as a **replacement** for the unverifiable V12 claim. Supports
+> the point made in §2.1.2 and §5.4.2 that coherence in the BERTopic architecture is strongly
+> affected by configuration (Kernel PCA + K-means, coherence 0.8463) rather than by the choice of
+> algorithm family, and does so on customer complaint tweets — a domain close to this study's.
+> Verified against the arXiv record (arXiv:2402.03176) and the publisher DOI.
+
+Ali, H., Hashmi, E., Yayilgan Yildirim, S., & Shaikh, S. (2024). Analyzing Amazon products
+sentiment: A comparative study of machine and deep learning, and transformer-based techniques.
+*Electronics, 13*(7), 1305. https://doi.org/10.3390/electronics13071305
+> Resolves **[V1]**. Verified against the MDPI record. Reports BERT outperforming the classical
+> and deep-learning models tested on Amazon reviews — a single-platform, aggregate-metric design
+> of exactly the kind Section 2.1.2 critiques.
+
+Shaukat, N. (2024). Sentiment analysis of product reviews using machine learning and pre-trained
+LLM. *Big Data and Cognitive Computing, 8*(12), 199. https://doi.org/10.3390/bdcc8120199
+> Resolves **[V2]**. Verified against the MDPI record. Its length-conditional finding — classical
+> models competitive on short comments, GPT-4 ahead on longer text — is cited in §2.1.2 because
+> this study's corpus spans that range.
+
+Sunar, A. S. (2025). Transformer and pre-transformer model-based sentiment prediction with
+various embeddings: A case study on Amazon reviews. *Entropy, 27*(12), 1202.
+https://doi.org/10.3390/e27121202
+> Resolves **[V3]**. Verified against the MDPI record; confirms the Amazon Magazine Subscriptions
+> 2023 dataset and the static-versus-contextual embedding comparison described in §2.1.2.
+
+Kong, Y., Xu, Z., & Mei, M. (2023). Cross-domain sentiment analysis based on feature projection
+and multi-source attention in IoT. *Sensors, 23*(16), 7282. https://doi.org/10.3390/s23167282
+> Resolves **[V4]**, and **corrects a misattribution**: this work was previously cited in the
+> draft as "Zhang et al. (2023)". The authors are Kong, Xu and Mei. Both the §2.1.2 citation and
+> the Table 2.1 row have been corrected.
+
+Ganin, Y., Ustinova, E., Ajakan, H., Germain, P., Larochelle, H., Laviolette, F., Marchand, M., &
+Lempitsky, V. (2016). Domain-adversarial training of neural networks. *Journal of Machine
+Learning Research, 17*(59), 1–35. https://jmlr.org/papers/v17/15-0239.html
+> Replaces **[V5]**. The original claim named an adversarial gradient-reversal study on
+> Amazon/Yelp/IMDB specifically, which could not be located. The sentence now cites the
+> foundational gradient-reversal method instead, which is what the argument actually required.
+
+Şilcenco, O., Machado, M. R., Ugulino, W. C., & Braun, D. (2025). A retail-corpus for
+aspect-based sentiment analysis with large language models. In *Proceedings of the International
+Conference on Natural Language and Speech Processing (ICNLSP 2025)*.
+https://aclanthology.org/2025.icnlsp-1.19/
+> Resolves **[V6]** (previously a bare arXiv identifier, arXiv:2508.17994). A 10,814-review
+> manually annotated multilingual retail corpus with GPT-4 and LLaMA-3 baselines.
+
+Schopf, T., Braun, D., & Matthes, F. (2022). Evaluating unsupervised text classification:
+Zero-shot and similarity-based approaches. In *Proceedings of the 2022 6th International
+Conference on Natural Language Processing and Information Retrieval* (pp. 6–15). Association for
+Computing Machinery. https://doi.org/10.1145/3582768.3582795
+> Resolves **[V7]** (previously arXiv:2211.16285). Its central finding — similarity-based methods
+> outperforming zero-shot ones in most cases — is the external justification for the
+> shortlist-then-rerank design in Section 3.6.3. Also absorbs the claim previously marked
+> **[V8]**, which described a broader benchmarking study that could not be located; the sentence
+> now rests on this verified source alone.
+
+Kaur, A., & Wallace, J. R. (2024). *Moving beyond LDA: A comparison of unsupervised topic
+modelling techniques for qualitative data analysis of online communities* (arXiv:2412.14486).
+arXiv. https://arxiv.org/abs/2412.14486
+> Resolves **[V11]** (previously a bare arXiv identifier). Note that the claim in the draft was
+> adjusted to match what the paper actually reports: this is a **human evaluation** in which 8 of
+> 12 qualitative researchers preferred BERTopic, not a coherence-score comparison. The corrected
+> framing is stronger for §2.1.3's argument, since human preference is the construct automated
+> coherence is meant to approximate.
+
 ---
 
-## Part C — Claims still without a located source
+## Part C — Closed
+
+**All markers are resolved.** V1–V11 and V13–V20 are cited in Part B above; V12, V-fin, V5 and V8 were closed by removal or substitution, each documented in its Part B note or in Chapter 2 §2.5. No unsourced claim remains in the text.
+
+### Original Part C log (retained for the audit trail)
 
 Each row is a claim currently made in the text with no verifiable citation behind it. **Do not
 invent an entry for any of these.** Either locate the source, or delete/soften the sentence so
@@ -201,18 +277,9 @@ that no unsupported claim remains.
 
 | ID | Claim as currently written | Where | Recommended action |
 |---|---|---|---|
-| V1 | Amazon sentiment comparison across ML, DL and transformers, cited as "*Electronics* (2024)" | §2.1.2, Table 2.1, Table 5.1 | Journal title only. Either locate it or replace with Areshey & Mathkour (2023/2024), which is verified and makes the same point |
-| V2 | ML vs pre-trained language models on product reviews, "*Big Data and Cognitive Computing* (2024)" | §2.1.2 | Journal title only. Replaceable by the same substitution as V1 |
-| V3 | Amazon Magazine Subscriptions 2023 dataset, several embedding schemes | §2.1.2 | No citation at all. Delete the sentence unless sourced |
-| V4 | Zhang et al. (2023), feature projection with multi-source attention | §2.1.2, Table 2.1 | Cited in text, absent from list. Locate or replace the cross-domain example |
-| V5 | Adversarial gradient-reversal cross-domain work on Amazon/Yelp/IMDB | §2.1.2 | No citation. Delete or source |
-| V6 | Retail ABSA corpus, cited as arXiv:2508.17994 | §2.1.2 | Bare identifier. Resolve on arXiv and complete, or delete |
-| V7 | Entailment vs similarity for unsupervised classification, arXiv:2211.16285 | §2.1.2 | Bare identifier. Resolve and complete |
-| V8 | Zero-shot benchmarking across cross-encoders, embeddings, rerankers, generative models | §2.1.2 | No citation. Delete or source |
-| V11 | BERTopic on online communities, arXiv:2412.14486 | §2.1.2 | Bare identifier. Resolve and complete |
-| **V12** | **Indonesian customer complaint study: LDA coherence 0.68 vs BERTopic 0.51** | §2.1.2, Table 2.1, Table 5.1 | **Load-bearing — these two figures are quoted in Chapter 5. If the source cannot be located, both numbers and the comparison built on them must be removed from Table 5.1 and §5.4.2** |
-| V-fin | Financial sentiment study (2023): BERT 87% accuracy, macro F1 0.85, three-class | Table 5.1, §5.4.2 | **Load-bearing** — this is the three-class benchmark your DistilBERT result is compared against. Source it or remove that row and the paragraph interpreting it |
-| V-16to56 | "False discovery rates between 16% and 56%" | §2.1.3, §5.2.4 | **Verify this figure against Lim & Lauw (2024) before retaining it.** The paper is now located, but this specific range was not confirmed during the audit. If it cannot be confirmed in the text, state the finding qualitatively instead — the argument does not depend on the exact numbers |
+
+| ~~V12~~ | ~~Indonesian customer complaint study: LDA 0.68 vs BERTopic 0.51~~ | ~~§2.1.2, Table 5.1~~ | **CLOSED — removed, not sourced.** Searching returned a genuine paper (Khadija & Nurharjadmo, 2024, SINERGI, doi:10.22441/sinergi.2024.1.015) on Indonesian complaints, but it compares LDA against *BERT embeddings*, not BERTopic, and its abstract does not report these figures. The 0.68/0.51 pair appears only in secondary summaries that also attribute a 0.92 LSA+NMF result to a study of ChatGPT-related tweets — i.e. at least two different papers conflated. Both figures and the Table 5.1 row have been deleted; the argumentative point is now carried by V11 and Ogunleye et al. (2023) |
+| ~~V-fin~~ | ~~Financial sentiment study (2023): BERT 87% accuracy, macro F1 0.85~~ | ~~Table 5.1, §5.4.2~~ | **CLOSED — removed, not sourced.** No single publication could be confirmed as the origin of this exact figure pair. Reported three-class results in this literature vary with the annotation-agreement threshold applied to the underlying corpus, so a quoted accuracy without that threshold is not a comparable quantity. The Table 5.1 row is deleted and §5.4.2 now explains why the three-class comparison is left open rather than substituting an approximate figure |
 
 ---
 
@@ -232,7 +299,8 @@ These are errors in the drafts, not missing references. Each needs a find-and-re
    which of the two papers your quoted percentages came from and cite that one.
 
 4. **Chapter 2 §2.5** currently lists V1–V20 as outstanding. Update it: V9, V10, V13, V14, V15,
-   V16, V17, V18, V19 and V20 are now resolved in Part B above. Only the rows in Part C remain.
+   V16, V17, V18, V19 and V20 are resolved in Part B above. V12 and V-fin are closed by removal
+   (see Part C). The markers still live in the text are V1–V8, V11 and V-16to56.
 
 ---
 
@@ -251,10 +319,10 @@ references. Current position:
 - **Applied comparison sources: incomplete.** V1–V8 and V11 remain unsourced. These are the
   breadth citations in §2.1.2. The chapter's argument survives without them, but the "range of
   research papers" expectation is better met with them present.
-- **Benchmark sources: two load-bearing gaps.** V12 and V-fin both supply numbers reused in
+- **Benchmark sources: both load-bearing gaps now closed by removal.** V12 and V-fin supplied numbers reused in
   Chapter 5. Unlike the breadth citations, these cannot simply be dropped without also removing
   the comparisons built on them.
 
-**Priority order:** V-fin and V12 first, because Chapter 5 quotes their figures. Then V4 and V1,
+**Priority order:** V-fin and V12 are now closed by removal. Next are V4 and V1,
 which appear in Table 2.1. The remainder are breadth citations and can be dropped with minor
 edits if they cannot be located.

@@ -14,24 +14,54 @@ endpoint that needs it will fail.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.api.deps import require_api_key
 from backend.api.routes import analytics, evaluation, rag, search, sentiment
 from backend.models.schemas import HealthResponse
+from backend.services.analytics_service import warm_cache
 from config import settings
 from logger import get_logger
 
 log = get_logger("api.main")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Warm the analytics cache while the server comes up.
+
+    The 407MB parquet is otherwise read during the first dashboard request,
+    which puts it in front of the user rather than in front of the deploy.
+    Started as a background task rather than awaited, deliberately: uvicorn
+    won't accept connections until the startup hook returns, and blocking
+    there would delay readiness for every endpoint and risk tripping the
+    container health check or a Cloud Run startup probe. This way /api/health
+    answers immediately, the read overlaps with startup, and the first
+    request either finds the data already resident or waits on the same lock
+    the loader has always used.
+    """
+
+    task = asyncio.create_task(asyncio.to_thread(warm_cache))
+
+    yield
+
+    if not task.done():
+        task.cancel()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="FeedbackIQ API",
     description=(
         "Backend for FeedbackIQ — sentiment analysis, complaint categorisation, "
@@ -42,8 +72,13 @@ app = FastAPI(
 )
 
 # The Streamlit frontend runs as a separate process/container and calls this
-# API over HTTP, so it needs CORS enabled. Wide open here because this is a
-# single-tenant internal tool, not a public multi-origin API.
+# API over HTTP, so it needs CORS enabled.
+#
+# Origins come from ALLOWED_ORIGINS (comma-separated) and default to "*",
+# which keeps local development and docker-compose working exactly as before.
+# In a deployed environment set it to the frontend's real URL, e.g.
+#   ALLOWED_ORIGINS=https://feedbackiq-frontend-xxxx.a.run.app
+# so the browser won't let arbitrary sites call the API on a user's behalf.
 #
 # allow_credentials is deliberately NOT set — combining it with
 # allow_origins=["*"] is invalid per the CORS spec (browsers reject
@@ -51,9 +86,15 @@ app = FastAPI(
 # uses cookie/credential-based auth today, so there's nothing to gain from
 # it and it would silently break any future browser client that tries to
 # call this API with credentials included.
+allowed_origins = [
+    origin.strip()
+    for origin in settings.ALLOWED_ORIGINS.split(",")
+    if origin.strip()
+] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -93,11 +134,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # Routers. Each route file already defines its own paths ("/predict",
 # "/analyse", ...); the prefix here is what makes the frontend's
 # "/api/<area>/<path>" URLs match.
-app.include_router(sentiment.router, prefix="/api/sentiment")
-app.include_router(search.router, prefix="/api/search")
-app.include_router(rag.router, prefix="/api/rag")
-app.include_router(analytics.router, prefix="/api/analytics")
-app.include_router(evaluation.router, prefix="/api/evaluation")
+#
+# The API key dependency is attached here rather than on individual routes,
+# so a new endpoint added to any of these routers is protected by default
+# instead of being protected only if its author remembered to ask for it.
+# "/" and "/api/health" below are deliberately left open — see backend/api/deps.py.
+protected = [Depends(require_api_key)]
+
+app.include_router(sentiment.router, prefix="/api/sentiment", dependencies=protected)
+app.include_router(search.router, prefix="/api/search", dependencies=protected)
+app.include_router(rag.router, prefix="/api/rag", dependencies=protected)
+app.include_router(analytics.router, prefix="/api/analytics", dependencies=protected)
+app.include_router(evaluation.router, prefix="/api/evaluation", dependencies=protected)
 
 
 @app.get("/", tags=["Health"], summary="API root")

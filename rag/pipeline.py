@@ -12,7 +12,7 @@ This is the SPECIFIC use case defined for the dissertation:
 """
 
 from __future__ import annotations
-import sys, os
+import sys, os, re, time
 
 # Must be set before torch/faiss are imported anywhere below. torch and
 # faiss-cpu each bundle their own OpenMP runtime; loading both in one
@@ -69,6 +69,53 @@ SIMILARITY_THRESHOLD = 0.35
 # guard against context overflow if the index is ever extended with
 # longer-form content.
 MAX_REVIEW_CHARS = 1000
+
+# Bounded retry for transient Groq rate-limit errors on the live request
+# path. Deliberately much smaller than evaluate/evaluate_llm_vs_rag.py's
+# retry budget (6 retries, 8s apart) -- that script runs unattended, this
+# runs while a person is waiting for a chat response, so it trades
+# completeness for not making them wait a long time for an error message.
+# It only retries rate-limit errors; anything else propagates immediately,
+# so it changes nothing about how genuine failures (bad key, network,
+# malformed request) are surfaced.
+MAX_LIVE_RETRIES = 2
+RETRY_BASE_WAIT = 2.0
+
+
+def _extract_retry_after_seconds(exc: Exception, default: float = RETRY_BASE_WAIT) -> float:
+    match = re.search(r"try again in ([\d.]+)s", str(exc))
+    if match:
+        try:
+            return float(match.group(1)) + 0.5
+        except ValueError:
+            pass
+    return default
+
+
+def _invoke_with_retry(fn, *args, max_retries: int = MAX_LIVE_RETRIES, **kwargs):
+    """Call fn(*args, **kwargs), retrying on rate-limit errors only.
+
+    Used to wrap the two LLM call sites on the live request path (the main
+    generation chain in ask(), and the scope-classifier call in
+    is_complaint_question_llm()) so a brief, transient Groq rate limit gets
+    absorbed instead of surfacing immediately as "An error occurred: ...".
+    Not a general-purpose retry-everything wrapper -- a non-rate-limit
+    exception raises on the first attempt, same as before this existed.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            is_rate_limit = "rate_limit" in str(exc).lower() or "429" in str(exc)
+            if not is_rate_limit or attempt >= max_retries:
+                raise
+            wait = _extract_retry_after_seconds(exc)
+            log.warning(
+                "Rate limit hit, retrying in %.1fs (%d/%d)",
+                wait, attempt + 1, max_retries,
+            )
+            time.sleep(wait)
+
 
 # create_stuff_documents_chain's default document formatter only inserts
 # doc.page_content into {context} — none of the metadata (platform, rating,
@@ -458,8 +505,13 @@ def ask(question: str,chat_history: Optional[list[dict]] = None,) -> dict[str, o
 
         chat_history_text = _format_chat_history_text(_build_history_string(chat_history or []))
 
-        # Retrieve relevant reviews and generate the final response
-        result = chain.invoke({"input": question, "chat_history": chat_history_text})
+        # Retrieve relevant reviews and generate the final response.
+        # _invoke_with_retry absorbs a brief Groq rate limit here instead of
+        # letting it fall straight through to the except Exception below and
+        # surfacing as "An error occurred" on the user's first request.
+        result = _invoke_with_retry(
+            chain.invoke, {"input": question, "chat_history": chat_history_text}
+        )
 
         retrieved_docs = result.get("context", [])
 

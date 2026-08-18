@@ -263,6 +263,13 @@ if rating_distribution:
                 .tail(15)
             )
 
+            # The backend serves exact corpus counts when
+            # scripts/precompute_keywords.py has been run, and a sample
+            # otherwise. Say which, rather than letting a sampled count be
+            # read as a corpus count.
+            basis = df_keywords["basis"].iloc[0] if "basis" in df_keywords else None
+            reviewed = int(df_keywords["n_reviews"].iloc[0]) if "n_reviews" in df_keywords else 0
+
             fig = px.bar(
                 df_keywords,
                 x="count",
@@ -287,6 +294,15 @@ if rating_distribution:
             )
 
             st.plotly_chart(fig, use_container_width=True)
+
+            if basis == "sample":
+                st.caption(
+                    f"Counts from a random sample of {reviewed:,} reviews, not the "
+                    "full corpus. Run `python scripts/precompute_keywords.py` "
+                    "for exact figures."
+                )
+            elif basis == "corpus" and reviewed:
+                st.caption(f"Counts across all {reviewed:,} reviews.")
 
 st.divider()
 

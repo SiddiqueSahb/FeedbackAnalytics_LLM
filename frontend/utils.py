@@ -21,6 +21,27 @@ from config import settings
 
 API = os.getenv("API_URL", settings.API_URL)
 
+# Every /api/* route except /api/health now requires this header (see
+# backend/api/deps.py). Read from the environment first so the deployed
+# frontend can be given the real key without it living in source.
+API_KEY = os.getenv("API_KEY", settings.API_KEY)
+HEADERS = {"x-api-key": API_KEY}
+
+# The backend loads its FAISS index and models on the first request that
+# needs them, not at startup — deliberately, so the server comes up even
+# when a model file is missing. The cost is that the first call after a
+# cold start reads well over a gigabyte from disk and can take the better
+# part of a minute. The old 15s GET timeout was comfortable locally, where
+# the index was usually already warm, and failed on a freshly started
+# container against an otherwise healthy backend. 90s covers the cold path;
+# a genuinely stuck backend still surfaces, just later.
+GET_TIMEOUT = int(os.getenv("API_GET_TIMEOUT", "90"))
+
+# Health is a small existence check with no model loading behind it, so it
+# should answer fast or be treated as down. Kept short on purpose — the
+# sidebar status widget calls it on every page render.
+HEALTH_TIMEOUT = int(os.getenv("API_HEALTH_TIMEOUT", "10"))
+
 # Used everywhere a sentiment class is shown — charts, badges, tables —
 # so "positive" is always the same green on every page.
 SENTIMENT_COLORS = {
@@ -31,17 +52,40 @@ SENTIMENT_COLORS = {
 
 
 @st.cache_data(show_spinner=False, ttl=60)
-def api_get(endpoint: str, params: dict | None = None) -> dict | list:
+def api_get(
+    endpoint: str,
+    params: dict | None = None,
+    timeout: int | None = None,
+) -> dict | list:
     """GET from the backend. Cached for a minute since dashboard data doesn't
     change second to second. Returns {} on any failure."""
 
     try:
-        response = requests.get(f"{API}{endpoint}", params=params, timeout=15)
+        response = requests.get(
+            f"{API}{endpoint}",
+            params=params,
+            headers=HEADERS,
+            timeout=timeout or GET_TIMEOUT,
+        )
 
         if response.ok:
             return response.json()
 
+        if response.status_code in (401, 403):
+            st.error(
+                "The backend rejected this request's API key. Set API_KEY to the "
+                "same value the backend is using (`.env` locally, or the "
+                "environment/secret on the deployed frontend)."
+            )
+            return {}
+
         st.error(f"API error ({response.status_code}): {response.text[:200]}")
+
+    except requests.exceptions.Timeout:
+        st.error(
+            "The backend didn't respond in time. If it was just started it may "
+            "still be loading the search index — wait a moment and retry."
+        )
 
     except requests.exceptions.ConnectionError:
         st.error(
@@ -62,7 +106,12 @@ def api_post(endpoint: str, payload: dict, timeout: int = 60) -> dict | list | N
     "empty result"."""
 
     try:
-        response = requests.post(f"{API}{endpoint}", json=payload, timeout=timeout)
+        response = requests.post(
+            f"{API}{endpoint}",
+            json=payload,
+            headers=HEADERS,
+            timeout=timeout,
+        )
 
         if response.ok:
             return response.json()
@@ -71,6 +120,13 @@ def api_post(endpoint: str, payload: dict, timeout: int = 60) -> dict | list | N
             detail = response.json().get("detail", response.text)
         except Exception:
             detail = response.text
+
+        if response.status_code in (401, 403):
+            st.error(
+                "The backend rejected this request's API key. Set API_KEY to the "
+                "same value the backend is using."
+            )
+            return None
 
         st.error(f"Request failed ({response.status_code}): {detail}")
 
@@ -102,7 +158,7 @@ def sidebar_status() -> None:
 
         st.markdown("### FeedbackIQ")
 
-        health = api_get("/api/health")
+        health = api_get("/api/health", timeout=HEALTH_TIMEOUT)
 
         if not health:
             st.error("Backend unreachable")

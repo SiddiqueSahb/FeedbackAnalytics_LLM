@@ -34,7 +34,15 @@ class Settings(BaseSettings):
     API_HOST:  str = "0.0.0.0"
     API_PORT:  int = 8000
     API_URL:   str = "http://localhost:8000"
+
+    # Shared secret required in the `x-api-key` header on every /api/* route
+    # except /api/health. Enforced by backend/api/deps.py, which refuses to
+    # start if ENVIRONMENT=production and this is still the default below.
     API_KEY:   str = "dev-key-feedbackiq"   # override in production .env
+
+    # Comma-separated CORS origins. "*" keeps local dev and docker-compose
+    # working; set this to the deployed frontend's URL in production.
+    ALLOWED_ORIGINS: str = "*"
 
     # LLM — no default keys here on purpose. A blank key makes a missing
     # .env entry an obvious, visible failure instead of quietly falling

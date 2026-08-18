@@ -41,11 +41,21 @@ COPY config.py logger.py exceptions.py ./
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     OMP_NUM_THREADS=1 \
-    KMP_DUPLICATE_LIB_OK=TRUE
+    KMP_DUPLICATE_LIB_OK=TRUE \
+    PORT=8000
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:${PORT}/api/health || exit 1
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form on purpose: exec form ["uvicorn", ..., "8000"] can't expand
+# $PORT, and platforms that assign the port at runtime — Cloud Run, App
+# Runner, Heroku — inject it as an environment variable. The ${PORT:-8000}
+# default keeps `docker run` and docker-compose behaving exactly as before.
+#
+# One worker deliberately. rag/pipeline.py and nlp/embedding_service.py both
+# cache their loaded artefacts per process (lru_cache + a lock), so each
+# extra uvicorn worker would load its own ~1.4GB copy of the FAISS index.
+# Scale by running more containers, not more workers in one container.
+CMD exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
