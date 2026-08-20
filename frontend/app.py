@@ -1,8 +1,12 @@
 """
-FeedbackIQ — AI-Powered Customer Feedback Analytics
+FeedbackIQ — landing page.
 
 Run:
     streamlit run frontend/app.py
+
+Organised around the four research questions rather than a feature list: each
+one states what was asked, what the numbers showed, and links to the page where
+that behaviour can be seen running.
 """
 
 import os
@@ -12,9 +16,9 @@ import streamlit as st
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import sidebar_status
+import theme
+from utils import api_get, sidebar_status
 
-# Page Configuration
 st.set_page_config(
     page_title="FeedbackIQ",
     page_icon="🔍",
@@ -22,172 +26,241 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+theme.inject()
 sidebar_status()
 
-# Header — plain, left-aligned, theme-driven. No custom CSS/HTML: st.title
-# already picks up the navy primaryColor and font from .streamlit/config.toml.
-st.title("FeedbackIQ")
-st.caption(
-    "Customer feedback analytics — sentiment classification, complaint "
-    "categorisation and retrieval-augmented question answering across "
-    "Amazon, Yelp and Twitter Airline reviews."
+# ── Hero ────────────────────────────────────────────────────────────────────
+theme.hero(
+    "FeedbackIQ",
+    "Which method should you actually use to analyse customer feedback — a lexicon, "
+    "classical machine learning, a fine-tuned transformer, or retrieval-augmented "
+    "generation? This system compares all four, stage by stage, across three very "
+    "different kinds of feedback.",
+    "MSc Data Science dissertation · University of Surrey · 642,692 reviews from "
+    "Amazon products, Yelp businesses and Twitter Airline complaints",
 )
 
-st.divider()
+# ── Corpus at a glance ──────────────────────────────────────────────────────
+# Read live where the backend can supply it, so the page never states a figure
+# the running system would contradict.
+stats = api_get("/api/analytics/summary") or {}
 
+total = stats.get("total_reviews")
+avg_rating = stats.get("avg_rating")
+negative = stats.get("negative_pct")
 
-# Platform Overview — bordered KPI cards instead of bare metrics, so the
-# headline numbers read as a stat panel rather than floating text.
-st.markdown("### Platform Overview")
+theme.kpi_grid([
+    ("Reviews indexed", f"{total:,}" if total else "642,692"),
+    ("Platforms", str(stats.get("platforms") or 3)),
+    ("Average rating", f"{avg_rating:.1f} / 5" if avg_rating else "—"),
+    ("Negative", f"{negative:.1f}%" if negative is not None else "—"),
+    ("Complaint categories", "24"),
+])
 
-col1, col2, col3, col4 = st.columns(4)
-
-with col1, st.container(border=True):
-    st.metric("Customer Reviews", "642K+")
-
-with col2, st.container(border=True):
-    st.metric("Platforms", "3")
-
-with col3, st.container(border=True):
-    st.metric("Complaint Categories", "24")
-
-with col4, st.container(border=True):
-    st.metric("Embedding Size", "384")
-
-st.divider()
-
-# Processing pipeline — a plain bordered card with a compact step list
-# instead of a large coloured info box with arrow emoji between stages.
-st.markdown("### How It Works")
-
-with st.container(border=True):
-    st.markdown(
-        "**Review**  →  **Sentiment analysis** (fine-tuned DistilBERT)  →  "
-        "**Complaint categorisation** (BERTopic + zero-shot classification)  →  "
-        "**Semantic search** (Sentence Transformers + FAISS)  →  "
-        "**Grounded answer** (LangChain + Groq LLM)"
-    )
+if not stats:
     st.caption(
-        "Each analysed review also produces a summary, keywords, severity, "
-        "priority, department routing and an executive summary."
+        "Backend unreachable — showing corpus constants. Start the API to load live figures."
     )
 
-st.divider()
+# ── Research questions ──────────────────────────────────────────────────────
+theme.section(
+    "Research Questions",
+    "What the study asked, what the numbers showed, and where you can watch the "
+    "system behave that way.",
+)
 
-# Features
-st.markdown("### Key Features")
+RESEARCH_QUESTIONS = [
+    {
+        "id": "RQ1",
+        "question": (
+            "How does sentiment classification performance differ between lexicon-based, "
+            "classical machine learning, pretrained transformer and fine-tuned transformer "
+            "approaches on multi-domain customer feedback?"
+        ),
+        "finding": (
+            "Fine-tuned DistilBERT led at <b>0.8375</b> macro F1 on clean held-out data — but "
+            "the ranking <b>reverses by platform</b>. Pretrained RoBERTa scores 0.7853 on "
+            "tweets and 0.5544 on Yelp prose, beating both classical models on the domain "
+            "closest to its pretraining and losing badly elsewhere. Fine-tuning bought "
+            "consistency — a 0.020 spread across platforms — rather than peak accuracy."
+        ),
+        "pages": [("Review Analysis", "pages/02_Analyse.py", "🧠"),
+                  ("Evaluation", "pages/06_Evaluation.py", "📈")],
+    },
+    {
+        "id": "RQ2",
+        "question": (
+            "How effectively does retrieval-augmented generation improve complaint "
+            "exploration compared with a standalone large language model?"
+        ),
+        "finding": (
+            "RAG reached <b>0.540</b> faithfulness with source attribution, while the "
+            "ungrounded baseline scored <i>higher</i> on answer relevancy — 0.753 against "
+            "0.610 — in under half the time. What retrieval buys is verifiability, not "
+            "responsiveness."
+        ),
+        "pages": [("AI Assistant", "pages/04_Chatbot.py", "💬"),
+                  ("Evaluation", "pages/06_Evaluation.py", "📈")],
+    },
+    {
+        "id": "RQ3",
+        "question": (
+            "Can BERTopic produce a coherent cross-domain complaint taxonomy from "
+            "heterogeneous customer reviews?"
+        ),
+        "finding": (
+            "121 raw topics discovered per platform were consolidated into <b>24 categories</b> "
+            "at 0.6334 coherence — but <b>27.6%</b> of held-out reviews stayed unclassified and "
+            "one category absorbed 28.2% of the sample. Usable, but not without a consolidation "
+            "stage and a data-driven category count."
+        ),
+        "pages": [("Dashboard", "pages/01_Dashboard.py", "📊"),
+                  ("Review Analysis", "pages/02_Analyse.py", "🧠")],
+    },
+    {
+        "id": "RQ4",
+        "question": (
+            "To what extent can retrieval-augmented answers be traced to, and verified "
+            "against, the source reviews used to produce them?"
+        ),
+        "finding": (
+            "Every answer returns the identifiers of the reviews that produced it, so "
+            "traceability is an architectural property rather than a claim. The figures bound "
+            "it honestly: at 0.540 faithfulness roughly half of statements were not fully "
+            "supported, and at 0.416 context precision the retrieved evidence was often not "
+            "the best available."
+        ),
+        "pages": [("AI Assistant", "pages/04_Chatbot.py", "💬"),
+                  ("Semantic Search", "pages/03_Search.py", "🔎")],
+    },
+]
 
-col1, col2 = st.columns(2)
-
-with col1:
-    with st.container(border=True):
-        st.subheader("Interactive Dashboard")
-        st.write("""
-Explore customer feedback through interactive visualisations.
-
-- Sentiment trends
-- Complaint categories
-- Platform comparison
-- Business insights
-""")
-
-with col2:
-    with st.container(border=True):
-        st.subheader("AI Review Analysis")
-        st.write("""
-Analyse individual customer reviews using AI.
-
-- Sentiment prediction
-- Complaint categorisation
-- AI-generated summary
-- Business recommendations
-""")
-
-col3, col4 = st.columns(2)
-
-with col3:
-    with st.container(border=True):
-        st.subheader("Semantic Search")
-        st.write("""
-Find similar customer reviews based on meaning rather than exact keywords using FAISS-powered semantic search.
-""")
-
-with col4:
-    with st.container(border=True):
-        st.subheader("AI Assistant")
-        st.write("""
-Ask questions about customer feedback in natural language.
-
-Example questions:
-
-- What are the most common complaints?
-- Which products receive the most negative feedback?
-- Summarise battery-related issues.
-""")
-
-st.divider()
-
-# Technology Stack — neutral bordered card, not a coloured banner.
-st.markdown("### Technology Stack")
-
-tech1, tech2 = st.columns(2)
-
-with tech1, st.container(border=True):
-    st.markdown("**Machine Learning & NLP**")
-    st.markdown("- Fine-tuned DistilBERT\n- BERTopic\n- BART zero-shot classification")
-    st.markdown("**Retrieval & LLM**")
+for rq in RESEARCH_QUESTIONS:
     st.markdown(
-        "- Sentence Transformers\n- FAISS vector search\n"
-        "- Retrieval-augmented generation\n- LangChain\n- Groq LLM"
+        f"""<div class="fiq-rq">
+              <span class="tag">{rq['id']}</span>
+              <div class="q">{rq['question']}</div>
+              <p class="a">{rq['finding']}</p>
+            </div>""",
+        unsafe_allow_html=True,
+    )
+    links = st.columns([1, 1, 3])
+    for col, (label, path, icon) in zip(links, rq["pages"]):
+        with col:
+            st.page_link(path, label=label, icon=icon, use_container_width=True)
+
+# ── How it works ────────────────────────────────────────────────────────────
+theme.section(
+    "How It Works",
+    "Three stages, because monitoring, diagnosis and investigation are different jobs "
+    "with different failure modes — and different evaluation regimes.",
+)
+
+STAGES = [
+    ("Stage 1", "Sentiment",
+     "Fine-tuned DistilBERT classifies each review, with VADER, Naive Bayes, logistic "
+     "regression and pretrained RoBERTa as comparison baselines.",
+     "Monitoring — how bad is it?"),
+    ("Stage 2", "Complaint discovery",
+     "BERTopic (UMAP + HDBSCAN) discovers topics per platform, consolidated into 24 "
+     "categories and assigned with DeBERTa-v3 zero-shot entailment.",
+     "Diagnosis — what is wrong?"),
+    ("Stage 3", "Grounded answers",
+     "MiniLM embeddings in FAISS, a two-stage scope guard and a similarity threshold, "
+     "then a language model answering only from retrieved reviews.",
+     "Investigation — show me the evidence."),
+]
+
+cards = "".join(
+    f"""<div class="fiq-card fiq-stage">
+          <div class="n">{n}</div>
+          <div class="t">{t}</div>
+          <div class="d">{d}</div>
+          <p class="p">{p}</p>
+        </div>"""
+    for n, t, d, p in STAGES
+)
+st.markdown(f'<div class="fiq-grid fiq-cards">{cards}</div>', unsafe_allow_html=True)
+
+st.caption(
+    "A macro F1, a coherence score and a faithfulness score are not comparable, so the "
+    "study measures each stage on its own terms rather than collapsing them into one number."
+)
+
+# ── Explore ─────────────────────────────────────────────────────────────────
+theme.section("Explore")
+
+PAGES = [
+    ("Dashboard", "pages/01_Dashboard.py", "📊"),
+    ("Review Analysis", "pages/02_Analyse.py", "🧠"),
+    ("Semantic Search", "pages/03_Search.py", "🔎"),
+    ("AI Assistant", "pages/04_Chatbot.py", "💬"),
+    ("Batch Upload", "pages/05_Upload.py", "📤"),
+    ("Evaluation", "pages/06_Evaluation.py", "📈"),
+]
+row1, row2 = st.columns(3), st.columns(3)
+for col, (label, path, icon) in zip(list(row1) + list(row2), PAGES):
+    with col:
+        st.page_link(path, label=label, icon=icon, use_container_width=True)
+
+# ── Detail, folded away ─────────────────────────────────────────────────────
+with st.expander("Technology and method detail"):
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("**Machine learning and NLP**")
+        st.markdown(
+            "- Fine-tuned DistilBERT · pretrained RoBERTa\n"
+            "- Naive Bayes · logistic regression · TF-IDF\n"
+            "- VADER lexicon baseline\n"
+            "- BERTopic + UMAP + HDBSCAN\n"
+            "- DeBERTa-v3 zero-shot classification"
+        )
+        st.markdown("**Retrieval and generation**")
+        st.markdown(
+            "- all-MiniLM-L6-v2 sentence embeddings\n"
+            "- FAISS vector index over 642,692 reviews\n"
+            "- LangChain · Llama 3.1 8B via Groq\n"
+            "- RAGAS: faithfulness, answer relevancy, context precision/recall"
+        )
+
+    with right:
+        st.markdown("**Engineering**")
+        st.markdown(
+            "- FastAPI backend · Streamlit frontend\n"
+            "- Docker Compose, two images by resource profile\n"
+            "- MLflow experiment tracking\n"
+            "- API-key auth on every route except health"
+        )
+        st.markdown("**Evaluation discipline**")
+        st.markdown(
+            "- One shared held-out set of 128,539 reviews\n"
+            "- Per-class and per-platform breakdowns, not just aggregates\n"
+            "- McNemar's exact test on paired predictions\n"
+            "- One executed ablation (metadata tagging)\n"
+            "- Every reported figure written to `data/results/` by the script that produced it"
+        )
+
+with st.expander("Known limitations"):
+    st.markdown(
+        "Stated here for the same reason they are stated in the dissertation: they bound "
+        "what the numbers above mean.\n\n"
+        "- **The fine-tuned model's shared-test-set figure is the least controlled number** "
+        "in the study. It was developed against a separately generated corpus version, so part "
+        "of the shared test set overlaps data it saw. Its clean figure — 0.8375 on its own "
+        "held-out partition — is the one to trust. The other four models are unaffected.\n"
+        "- **Labels derive from star ratings**, so a four-star review containing a complaint is "
+        "labelled positive. This bounds every model's ceiling.\n"
+        "- **Generation was evaluated on five questions**, graded by the same model family that "
+        "produced the answers. Directional, not precise.\n"
+        "- **The 0.35 similarity threshold is unvalidated** — a starting point, not a calibrated "
+        "constant.\n"
+        "- **Three of four planned ablations were not run**, and component metrics point at "
+        "retrieval as the weak link, so those are the most consequential missing experiments."
     )
 
-with tech2, st.container(border=True):
-    st.markdown("**Backend & Deployment**")
-    st.markdown("- FastAPI\n- Streamlit\n- Docker")
-    st.markdown("**Programming**")
-    st.markdown("- Python\n- PyTorch\n- Pandas\n- NumPy")
-
 st.divider()
-
-# Business Value
-st.markdown("### Business Value")
-
-st.write("""
-FeedbackIQ helps organisations understand customer feedback at scale by automatically:
-
-- Detecting customer sentiment
-- Identifying complaint categories
-- Retrieving similar historical reviews
-- Generating actionable business recommendations
-- Prioritising critical customer issues
-- Routing cases to the appropriate business department
-- Producing concise executive summaries for decision-makers
-""")
-
-st.divider()
-
-# Navigation
-st.markdown("### Explore the Platform")
-
-nav1, nav2, nav3, nav4 = st.columns(4)
-
-with nav1:
-    st.page_link("pages/01_Dashboard.py", label="Dashboard", icon="📊", use_container_width=True)
-
-with nav2:
-    st.page_link("pages/02_Analyse.py", label="Review Analysis", icon="🧠", use_container_width=True)
-
-with nav3:
-    st.page_link("pages/03_Search.py", label="Semantic Search", icon="🔎", use_container_width=True)
-
-with nav4:
-    st.page_link("pages/04_Chatbot.py", label="AI Assistant", icon="💬", use_container_width=True)
-
-st.divider()
-
-# Footer
 st.caption(
-    "**FeedbackIQ v1.0** — AI-Powered Customer Feedback Analytics Platform  \n"
-    "Built with Python, FastAPI, Streamlit, Hugging Face, DistilBERT, BERTopic, "
-    "Sentence Transformers, FAISS, LangChain and Groq LLM."
+    "FeedbackIQ v1.0 · Built with Python, FastAPI, Streamlit, Hugging Face, DistilBERT, "
+    "BERTopic, Sentence Transformers, FAISS, LangChain and Groq."
 )

@@ -1,5 +1,9 @@
 """
-Dashboard - Customer Feedback Analytics
+Dashboard — corpus-level view of sentiment, ratings, categories and trends.
+
+The previous version restated the same four figures three times in prose
+("Business Snapshot", "Executive Summary", "Key Business Insights") before
+showing a chart. The numbers are in the KPI row; the charts are the content.
 """
 
 import os
@@ -13,9 +17,8 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-from utils import api_get, sidebar_status, SENTIMENT_COLORS
-
-COLOR_MAP = SENTIMENT_COLORS
+import theme
+from utils import api_get, page_header, sidebar_status, SENTIMENT_COLORS
 
 st.set_page_config(
     page_title="Dashboard | FeedbackIQ",
@@ -23,18 +26,17 @@ st.set_page_config(
     layout="wide",
 )
 
+theme.inject()
 sidebar_status()
 
-st.title("Customer Feedback Analytics Dashboard")
-st.write(
-    "Monitor customer sentiment, complaint trends and platform performance "
-    "using AI-powered customer feedback analytics."
+page_header(
+    "Analytics Dashboard",
+    "Sentiment, ratings, complaint categories and trends across the full corpus "
+    "of 642,692 reviews.",
+    rq=["RQ1", "RQ3"],
 )
 
-st.divider()
-
-
-# Load analytics
+# ── Load ────────────────────────────────────────────────────────────────────
 with st.spinner("Loading dashboard..."):
     stats = api_get("/api/analytics/summary")
     by_platform = api_get("/api/analytics/sentiment-by-platform")
@@ -43,371 +45,190 @@ with st.spinner("Loading dashboard..."):
     trends = api_get("/api/analytics/trends")
     platforms = api_get("/api/analytics/platforms")
 
+if not stats:
+    st.error(
+        "Unable to load analytics. Check that the FastAPI backend is running and "
+        "that data/processed/reviews_unified.parquet is present."
+    )
+    st.stop()
 
-# Sidebar
+# ── Filters ─────────────────────────────────────────────────────────────────
 st.sidebar.header("Filters")
 
 if isinstance(platforms, list) and platforms:
-    selected_platforms = st.sidebar.multiselect(
-        "Platform",
-        platforms,
-        default=platforms,
-    )
+    selected_platforms = st.sidebar.multiselect("Platform", platforms, default=platforms)
 else:
     selected_platforms = []
 
 selected_sentiment = st.sidebar.selectbox(
-    "Sentiment",
-    ["All", "positive", "negative", "neutral"],
+    "Sentiment", ["All", "positive", "negative", "neutral"]
 )
 
-st.sidebar.info(
-    """
-Filter the dashboard to compare platforms,
-sentiment distribution and customer trends.
-"""
+st.sidebar.caption(
+    "Filters apply to the sentiment and trend charts. Ratings and keywords are "
+    "corpus-wide."
 )
 
-# KPI cards
-if stats:
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    with col1, st.container(border=True):
-        st.metric("Total Reviews", f"{stats.get('total_reviews',0):,}")
-
-    with col2, st.container(border=True):
-        st.metric("Average Rating", f"{stats.get('avg_rating',0):.1f} / 5")
-
-    with col3, st.container(border=True):
-        st.metric("Positive Reviews", f"{stats.get('positive_pct',0):.1f}%")
-
-    with col4, st.container(border=True):
-        st.metric("Negative Reviews", f"{stats.get('negative_pct',0):.1f}%")
-
-    with col5, st.container(border=True):
-        st.metric("Neutral Reviews", f"{stats.get('neutral_pct',0):.1f}%")
-
-else:
-    st.error(
-        "Unable to load analytics. Please make sure the FastAPI backend is running."
-    )
-
-st.divider()
-
-# Business Snapshot
-with st.container(border=True):
-
-    st.subheader("Business Snapshot")
-
-    st.write(
-        f"""
-The dashboard currently analyses **{stats.get('total_reviews',0):,} customer reviews**
-collected from multiple platforms.
-
-Overall sentiment remains **{stats.get('positive_pct',0):.1f}% positive**, while
-**{stats.get('negative_pct',0):.1f}%** of reviews indicate opportunities to improve
-customer experience.
-"""
-    )
-
-st.divider()
-
-# Executive summary
-positive = stats.get("positive_pct", 0)
-negative = stats.get("negative_pct", 0)
-rating = stats.get("avg_rating", 0)
-
-platform_count = len(platforms)
-
-summary = (
-    f"A total of **{stats.get('total_reviews',0):,} customer reviews** "
-    f"were analysed across **{platform_count} platforms**. "
-    f"Overall sentiment is **{positive:.1f}% positive**, "
-    f"with an average rating of **{rating:.1f}/5**. "
-    f"Negative reviews account for **{negative:.1f}%** of customer feedback."
-)
-with st.container(border=True):
-
-    st.subheader("Executive Summary")
-
-    st.write(summary)
-
-st.divider()
-
-# Sentiment overview
-if by_platform:
-
-    df_platform = pd.DataFrame(by_platform)
-
-    if selected_platforms:
-        df_platform = df_platform[
-            df_platform["platform"].isin(selected_platforms)
-        ]
-
-    if selected_sentiment != "All":
-        df_platform = df_platform[
-            df_platform["sentiment_label"] == selected_sentiment
-        ]
-
-    color_map = COLOR_MAP
-
-    col1, col2 = st.columns([1.3, 1])
-
-    with col1:
-
-        st.subheader("Sentiment by Platform")
-
-        fig = px.bar(
-            df_platform,
-            x="platform",
-            y="count",
-            color="sentiment_label",
-            barmode="group",
-            color_discrete_map=color_map,
-            title="Sentiment by Platform",
-            labels={
-                "platform": "Platform",
-                "count": "Reviews",
-                "sentiment_label": "Sentiment",
-            },
-        )
-
-        fig.update_layout(
-            height=420,
-            plot_bgcolor="white",
-            legend_title="Sentiment",
-            margin=dict(l=10, r=10, t=40, b=10),
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-
-        st.subheader("Overall Sentiment")
-
-        summary = (
-            df_platform.groupby("sentiment_label")["count"]
-            .sum()
-            .reset_index()
-        )
-
-        fig = px.pie(
-            summary,
-            values="count",
-            names="sentiment_label",
-            hole=0.55,
-            color="sentiment_label",
-            color_discrete_map=color_map,
-            title="Overall Sentiment",
-        )
-
-        fig.update_traces(
-            textposition="inside",
-            textinfo="percent+label",
-        )
-
-        fig.update_layout(
-            height=420,
-            margin=dict(l=10, r=10, t=40, b=10),
-            showlegend=False,
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# Rating distribution and keywords
-if rating_distribution:
-
-    st.subheader("Customer Ratings & Trending Keywords")
-
-    col1, col2 = st.columns([1, 1])
-
-    df_rating = pd.DataFrame(rating_distribution)
-
-    with col1:
-
-        fig = px.bar(
-            df_rating,
-            x="rating",
-            y="count",
-            text="count",
-            color="rating",
-            color_continuous_scale="RdYlGn",
-            labels={
-                "rating": "Star Rating",
-                "count": "Reviews",
-            },
-        )
-
-        fig.update_traces(textposition="outside")
-
-        fig.update_layout(
-            title="Rating Distribution",
-            height=420,
-            plot_bgcolor="white",
-            showlegend=False,
-            margin=dict(l=10, r=10, t=40, b=10),
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-
-        if keywords:
-
-            df_keywords = (
-                pd.DataFrame(keywords)
-                .sort_values("count", ascending=True)
-                .tail(15)
-            )
-
-            # The backend serves exact corpus counts when
-            # scripts/precompute_keywords.py has been run, and a sample
-            # otherwise. Say which, rather than letting a sampled count be
-            # read as a corpus count.
-            basis = df_keywords["basis"].iloc[0] if "basis" in df_keywords else None
-            reviewed = int(df_keywords["n_reviews"].iloc[0]) if "n_reviews" in df_keywords else 0
-
-            fig = px.bar(
-                df_keywords,
-                x="count",
-                y="word",
-                orientation="h",
-                text="count",
-                color="count",
-                color_continuous_scale="Blues",
-                labels={
-                    "count": "Frequency",
-                    "word": "Keyword",
-                },
-            )
-
-            fig.update_layout(
-                title="Most Frequent Keywords",
-                height=420,
-                plot_bgcolor="white",
-                margin=dict(l=10, r=10, t=40, b=10),
-                yaxis=dict(categoryorder="total ascending"),
-                showlegend=False,
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            if basis == "sample":
-                st.caption(
-                    f"Counts from a random sample of {reviewed:,} reviews, not the "
-                    "full corpus. Run `python scripts/precompute_keywords.py` "
-                    "for exact figures."
-                )
-            elif basis == "corpus" and reviewed:
-                st.caption(f"Counts across all {reviewed:,} reviews.")
-
-st.divider()
-
-# Monthly sentiment trends
-if trends:
-
-    st.subheader("Customer Sentiment Trends")
-
-    df_trend = pd.DataFrame(trends)
-
-    if not df_trend.empty:
-
-        if selected_sentiment != "All":
-            df_trend = df_trend[
-                df_trend["sentiment_label"] == selected_sentiment
-            ]
-
-        color_map = COLOR_MAP
-
-        fig = px.line(
-            df_trend,
-            x="month",
-            y="count",
-            color="sentiment_label",
-            markers=True,
-            color_discrete_map=color_map,
-            title="Customer Sentiment Trends",
-            labels={
-                "month": "Month",
-                "count": "Reviews",
-                "sentiment_label": "Sentiment",
-            },
-        )
-
-        fig.update_layout(
-            height=420,
-            plot_bgcolor="white",
-            hovermode="x unified",
-            margin=dict(l=10, r=10, t=40, b=10),
-            legend_title="Sentiment",
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    else:
-        st.info("Trend data is not available for this dataset.")
-
-st.divider()
-
-
-# Business insights
-st.subheader("Key Business Insights")
-
-insight1, insight2 = st.columns(2)
-
-with insight1, st.container(border=True):
-
-    st.markdown("**Customer Satisfaction**")
-    st.markdown(f"""
-- Positive sentiment: **{stats.get('positive_pct',0):.1f}%**
-- Average rating: **{stats.get('avg_rating',0):.1f}/5**
-- Customers generally report a positive experience across platforms.
-""")
-
-with insight2, st.container(border=True):
-
-    st.markdown("**Improvement Opportunities**")
-    st.markdown(f"""
-- Negative sentiment: **{stats.get('negative_pct',0):.1f}%**
-- Review recurring complaints using Semantic Search.
-- Use AI Review Analysis to identify actionable improvements.
-""")
-
-st.divider()
-
-
-# Dashboard summary
-st.subheader("Dashboard Summary")
-
-st.write(
-"""
-FeedbackIQ combines machine learning, semantic search and large language models
-to transform customer reviews into actionable business intelligence.
-
-The dashboard enables users to:
-
-- Monitor customer sentiment
-- Compare platforms
-- Identify complaint trends
-- Explore reviews using semantic search
-- Support data-driven business decisions
-"""
-)
-
-st.divider()
+# ── KPIs ────────────────────────────────────────────────────────────────────
+kpi = st.columns(5)
+cards = [
+    ("Total reviews", f"{stats.get('total_reviews', 0):,}"),
+    ("Average rating", f"{stats.get('avg_rating', 0):.1f} / 5"),
+    ("Positive", f"{stats.get('positive_pct', 0):.1f}%"),
+    ("Negative", f"{stats.get('negative_pct', 0):.1f}%"),
+    ("Neutral", f"{stats.get('neutral_pct', 0):.1f}%"),
+]
+for col, (label, value) in zip(kpi, cards):
+    with col, st.container(border=True):
+        st.metric(label, value)
 
 st.caption(
-"""
-FeedbackIQ • AI-Powered Customer Feedback Analytics
-
-Built using Python, FastAPI, Streamlit,
-DistilBERT, BERTopic, BART,
-Sentence Transformers, FAISS,
-LangChain and Groq LLM.
-"""
+    "Labels are derived from star ratings, so a four-star review containing a "
+    "complaint counts as positive. This bounds every figure on this page."
 )
 
+st.divider()
 
+# ── Charts ──────────────────────────────────────────────────────────────────
+tab_sentiment, tab_ratings, tab_keywords, tab_trends = st.tabs(
+    ["Sentiment", "Ratings", "Keywords", "Trends"]
+)
+
+CHART_LAYOUT = dict(height=420, plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=40, b=10))
+
+# ── Sentiment ───────────────────────────────────────────────────────────────
+with tab_sentiment:
+    if by_platform:
+        df_platform = pd.DataFrame(by_platform)
+
+        if selected_platforms:
+            df_platform = df_platform[df_platform["platform"].isin(selected_platforms)]
+        if selected_sentiment != "All":
+            df_platform = df_platform[df_platform["sentiment_label"] == selected_sentiment]
+
+        if df_platform.empty:
+            st.info("No data matches the current filters.")
+        else:
+            left, right = st.columns([1.4, 1])
+
+            with left:
+                fig = px.bar(
+                    df_platform, x="platform", y="count", color="sentiment_label",
+                    barmode="group", color_discrete_map=SENTIMENT_COLORS,
+                    title="Sentiment by platform",
+                    labels={"platform": "Platform", "count": "Reviews",
+                            "sentiment_label": "Sentiment"},
+                )
+                fig.update_layout(legend_title="Sentiment", **CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
+
+            with right:
+                summary = df_platform.groupby("sentiment_label")["count"].sum().reset_index()
+                fig = px.pie(
+                    summary, values="count", names="sentiment_label", hole=0.55,
+                    color="sentiment_label", color_discrete_map=SENTIMENT_COLORS,
+                    title="Overall sentiment",
+                )
+                fig.update_traces(textposition="inside", textinfo="percent+label")
+                fig.update_layout(showlegend=False, **CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.caption(
+                "The platform split is the study's central finding: model ranking "
+                "reverses depending on which platform the text comes from."
+            )
+    else:
+        st.info("Sentiment breakdown unavailable.")
+
+# ── Ratings ─────────────────────────────────────────────────────────────────
+with tab_ratings:
+    if rating_distribution:
+        df_rating = pd.DataFrame(rating_distribution)
+        fig = px.bar(
+            df_rating, x="rating", y="count", text="count",
+            color="rating", color_continuous_scale="RdYlGn",
+            labels={"rating": "Star rating", "count": "Reviews"},
+            title="Rating distribution",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(showlegend=False, coloraxis_showscale=False, **CHART_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Ratings are the source of the sentiment labels, which is why the shape "
+            "here constrains what any classifier can learn."
+        )
+    else:
+        st.info("Rating distribution unavailable.")
+
+# ── Keywords ────────────────────────────────────────────────────────────────
+with tab_keywords:
+    if keywords:
+        df_keywords = pd.DataFrame(keywords).sort_values("count", ascending=True).tail(20)
+
+        basis = df_keywords["basis"].iloc[0] if "basis" in df_keywords else None
+        reviewed = int(df_keywords["n_reviews"].iloc[0]) if "n_reviews" in df_keywords else 0
+
+        fig = px.bar(
+            df_keywords, x="count", y="word", orientation="h", text="count",
+            color="count", color_continuous_scale="Blues",
+            labels={"count": "Frequency", "word": "Phrase"},
+            title="Most frequent phrases",
+        )
+        fig.update_layout(
+            height=560, plot_bgcolor="white", showlegend=False,
+            coloraxis_showscale=False, yaxis=dict(categoryorder="total ascending"),
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        if basis == "sample":
+            st.caption(
+                f"Counts from a random sample of {reviewed:,} reviews, not the full corpus. "
+                "Run `python scripts/precompute_keywords.py` for exact figures."
+            )
+        elif basis == "corpus" and reviewed:
+            st.caption(f"Counts across all {reviewed:,} reviews.")
+    else:
+        st.info("Keyword analysis unavailable.")
+
+# ── Trends ──────────────────────────────────────────────────────────────────
+with tab_trends:
+    if trends:
+        df_trend = pd.DataFrame(trends)
+        if selected_sentiment != "All":
+            df_trend = df_trend[df_trend["sentiment_label"] == selected_sentiment]
+
+        if df_trend.empty:
+            st.info("Trend data is not available for this selection.")
+        else:
+            fig = px.line(
+                df_trend, x="month", y="count", color="sentiment_label", markers=True,
+                color_discrete_map=SENTIMENT_COLORS,
+                labels={"month": "Month", "count": "Reviews",
+                        "sentiment_label": "Sentiment"},
+                title="Sentiment over time",
+            )
+            fig.update_layout(hovermode="x unified", legend_title="Sentiment", **CHART_LAYOUT)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "Review volume varies substantially by month and platform, so read "
+                "the shape rather than the absolute counts."
+            )
+    else:
+        st.info("Trend data unavailable for this dataset.")
+
+st.divider()
+
+# ── Where to go next ────────────────────────────────────────────────────────
+st.subheader("Go deeper")
+nav = st.columns(3)
+with nav[0]:
+    st.page_link("pages/03_Search.py", label="Find specific reviews",
+                 icon="🔎", use_container_width=True)
+with nav[1]:
+    st.page_link("pages/04_Chatbot.py", label="Ask about the patterns",
+                 icon="💬", use_container_width=True)
+with nav[2]:
+    st.page_link("pages/06_Evaluation.py", label="See how it was evaluated",
+                 icon="📈", use_container_width=True)

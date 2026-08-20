@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import json
 import os
 import sys
@@ -219,6 +220,50 @@ def _get_chain():
     return prompt | llm.with_structured_output(ReviewAnalysisLLM)
 
 
+def _recover_from_failed_tool_call(exc: Exception):
+    """
+    Rescue a valid analysis from a Groq `tool_use_failed` error.
+
+    Some models write the requested JSON as ordinary content rather than as a
+    tool call. Groq rejects the response with HTTP 400 and code
+    `tool_use_failed`, but includes what the model actually wrote in the error
+    body under `failed_generation`. That text is usually the complete answer.
+
+    Returns the validated analysis as a dict, or None if this was a different
+    error, or if the payload doesn't validate — in which case the caller falls
+    through to EMPTY_ANALYSIS exactly as before. Nothing is trusted that the
+    schema wouldn't have accepted from a tool call.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        # Older/other client versions surface the payload only in the message.
+        match = re.search(r"'failed_generation':\s*'(.*)'\}\}\s*$", str(exc), re.S)
+        raw = match.group(1).encode().decode("unicode_escape") if match else None
+    else:
+        error = body.get("error") or {}
+        if error.get("code") != "tool_use_failed":
+            return None
+        raw = error.get("failed_generation")
+
+    if not raw:
+        return None
+
+    # The model sometimes wraps the JSON in prose or a ```json fence.
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.S)
+    candidate = fenced.group(1) if fenced else raw
+    if not fenced:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        candidate = candidate[start:end + 1]
+
+    try:
+        return ReviewAnalysisLLM.model_validate_json(candidate).model_dump()
+    except (ValidationError, ValueError):
+        log.warning("Recovered payload from failed tool call did not validate.")
+        return None
+
+
 # ----------------------------------------------------------------------
 # Main Function
 # ----------------------------------------------------------------------
@@ -279,7 +324,25 @@ def analyse_review_with_llm(
         log.exception("LLM returned a malformed or out-of-enum analysis shape.")
         return EMPTY_ANALYSIS.copy()
 
-    except Exception:
+    except Exception as exc:
+        # Not every model on Groq emits tool calls reliably. with_structured_output()
+        # is implemented as a tool call, so a model that writes the JSON as ordinary
+        # content gets rejected by the API with `tool_use_failed` — even when the JSON
+        # it produced is complete and correct. openai/gpt-oss-20b does exactly this.
+        #
+        # Groq returns that content in the error body as `failed_generation`, so the
+        # answer is recoverable: validate it against the same schema the tool call
+        # would have been checked against. If it validates, nothing has been relaxed —
+        # the guarantee comes from ReviewAnalysisLLM either way, only the transport
+        # differed.
+        recovered = _recover_from_failed_tool_call(exc)
+        if recovered is not None:
+            log.warning(
+                "Model did not emit a tool call; recovered and validated the JSON "
+                "from the error payload instead."
+            )
+            return recovered
+
         log.exception("LLM request failed.")
         return EMPTY_ANALYSIS.copy()
 

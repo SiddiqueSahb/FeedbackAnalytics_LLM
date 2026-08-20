@@ -133,6 +133,52 @@ def call_with_retry(fn, *args, max_retries: int = MAX_RATE_LIMIT_RETRIES, **kwar
             time.sleep(wait)
 
 
+# RAGAS asks the judge to decompose an answer into individual statements and
+# return a verdict on each as JSON. That output is far longer than a normal
+# chat reply, and if the model stops before closing the JSON, RAGAS raises
+# LLMDidNotFinishException and records NaN for that question.
+#
+# That is not a harmless gap. The means are computed over whatever scored, so
+# a failure in one condition and a different failure in the other produces two
+# averages taken over different questions — which is not a paired comparison
+# and can flip the sign of the reported delta. It did exactly that on the
+# 19 August run: faithfulness read +0.058 across the two 4-question means, but
+# −0.006 across the 3 questions both conditions actually scored.
+#
+# 4096 is comfortably above what these prompts need and well inside
+# llama-3.1-8b-instant's completion limit. Setting max_tokens costs nothing on
+# the free tier — it caps a single response, it does not buy quota. If you hit
+# rate limits, lower the questions or add delay; don't lower this.
+RAGAS_JUDGE_MAX_TOKENS = 4096
+
+
+def _get_judge_llm():
+    """
+    A separate client for the RAGAS judge, not the one the pipeline generates
+    with.
+
+    Two reasons for keeping them apart. The judge needs a much larger
+    max_tokens than generation does, and raising it on the shared client would
+    change how ask() behaves — which would make this ablation's answers
+    incomparable with every other result in the study. And a judge should be
+    configured for consistency rather than for fluency: temperature 0 here
+    against the pipeline's 0.2, so repeated runs vary as little as the API
+    allows. It does not make the judge deterministic; it just stops it adding
+    variance of its own on top of the generator's.
+    """
+    from langchain_groq import ChatGroq
+
+    return ChatGroq(
+        api_key=settings.GROQ_API_KEY,
+        model_name=settings.GROQ_MODEL,
+        temperature=0,
+        max_tokens=RAGAS_JUDGE_MAX_TOKENS,
+        # Longer than the pipeline's 30s: these prompts are bigger and there
+        # is no user waiting on the other end of an evaluation run.
+        timeout=120,
+    )
+
+
 def _get_ragas_llm(llm) -> LangchainLLMWrapper:
     return LangchainLLMWrapper(llm, bypass_n=True)
 
@@ -298,7 +344,7 @@ print("✓ untagged_answers.csv saved")
 # ask(), same object-isolation pattern as evaluate_llm_vs_rag.py)
 # =============================================================================
 
-judge_llm = _get_llm()
+judge_llm = _get_judge_llm()
 ragas_llm = _get_ragas_llm(judge_llm)
 ragas_embeddings = _get_ragas_embeddings()
 eval_run_config = RunConfig(max_workers=1, max_retries=10, max_wait=60)
@@ -356,6 +402,59 @@ print("Creating comparison summary")
 print("=" * 80)
 
 metric_cols = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+
+# ---------------------------------------------------------------------------
+# Pairing check.
+#
+# pandas .mean() skips NaN silently. If the judge failed on question 4 in the
+# tagged condition and question 1 in the untagged one, both columns still
+# produce a number — but those two numbers are averages over different
+# questions, and subtracting them is not a paired comparison. On the
+# 19 August run that turned a real −0.006 into a reported +0.058.
+#
+# So: fail loudly instead of averaging around the hole. Nothing downstream
+# should ever have to guess whether a delta was computed like for like.
+# ---------------------------------------------------------------------------
+print()
+unpaired = []
+for col in metric_cols:
+    t_missing = tagged_scores_df[col].isna()
+    u_missing = untagged_scores_df[col].isna()
+    n_missing = int(t_missing.sum() + u_missing.sum())
+
+    if n_missing == 0:
+        print(f"  {col:<20} scored in both conditions on all "
+              f"{len(tagged_scores_df)} questions")
+        continue
+
+    unpaired.append(col)
+    print(f"  {col:<20} UNPAIRED — judge failed on "
+          f"{int(t_missing.sum())} tagged / {int(u_missing.sum())} untagged")
+    for label, mask, df in (("tagged", t_missing, tagged_scores_df),
+                            ("untagged", u_missing, untagged_scores_df)):
+        for q in df.loc[mask, "user_input"]:
+            print(f"      no {col} score ({label}): {q[:60]}")
+
+    both = (~t_missing) & (~u_missing)
+    if both.any():
+        paired_delta = (tagged_scores_df.loc[both, col].mean()
+                        - untagged_scores_df.loc[both, col].mean())
+        naive_delta = tagged_scores_df[col].mean() - untagged_scores_df[col].mean()
+        print(f"      delta over all scored rows : {naive_delta:+.4f}  <- NOT comparable")
+        print(f"      delta over the {int(both.sum())} shared rows: {paired_delta:+.4f}  <- the honest figure")
+
+if unpaired:
+    print(
+        "\n  WARNING: "
+        + ", ".join(unpaired)
+        + " cannot be compared between conditions on this run.\n"
+        "  The judge did not complete on every question. Raise "
+        f"RAGAS_JUDGE_MAX_TOKENS (currently {RAGAS_JUDGE_MAX_TOKENS}) and re-run\n"
+        "  before quoting these deltas anywhere."
+    )
+else:
+    print("\n  All metrics paired across both conditions — deltas are comparable.")
+print()
 
 comparison = pd.DataFrame({
     "Metric": ["Faithfulness", "Answer Relevancy", "Context Precision", "Context Recall", "Average Latency (ms)"],

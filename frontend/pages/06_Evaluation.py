@@ -19,7 +19,8 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-from utils import api_get, sidebar_status
+import theme
+from utils import api_get, page_header, sidebar_status
 
 st.set_page_config(
     page_title="Evaluation | FeedbackIQ",
@@ -27,19 +28,19 @@ st.set_page_config(
     layout="wide",
 )
 
+theme.inject()
 sidebar_status()
 
-st.title("Model & Pipeline Evaluation")
-st.write(
-    "Performance results for the sentiment classifiers, retrieval methods "
-    "and the RAG chatbot, produced by the evaluation scripts used for the "
-    "dissertation's results chapter."
+page_header(
+    "Evaluation",
+    "The evidence behind the claims on the home page. Every figure here was "
+    "written to `data/results/` by the script that computed it — nothing on this "
+    "page was typed by hand.",
+    rq=["RQ1", "RQ2", "RQ3", "RQ4"],
 )
 
-st.divider()
-
 tab_sentiment, tab_retrieval, tab_rag = st.tabs(
-    ["Sentiment Classification", "Retrieval", "RAG Chatbot (RAGAS)"]
+    ["Sentiment — RQ1", "Retrieval — RQ4", "Generation — RQ2"]
 )
 
 

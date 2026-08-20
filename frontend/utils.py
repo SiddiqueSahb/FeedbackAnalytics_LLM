@@ -8,6 +8,7 @@ same requests.get(...)/try/except boilerplate five times.
 """
 
 import os
+import re
 import sys
 
 import requests
@@ -143,6 +144,89 @@ def api_post(endpoint: str, payload: dict, timeout: int = 60) -> dict | list | N
         st.error(f"Unexpected error calling the API: {exc}")
 
     return None
+
+
+# Which research question each page demonstrates. Kept here rather than in the
+# pages so the mapping is stated once and every page shows it the same way —
+# the landing page is organised around these four questions, and a page that
+# didn't name its own would break that thread.
+RESEARCH_QUESTIONS = {
+    "RQ1": "How does sentiment classification performance differ between lexicon, "
+           "classical, pretrained transformer and fine-tuned transformer approaches?",
+    "RQ2": "How effectively does retrieval-augmented generation improve complaint "
+           "exploration compared with a standalone large language model?",
+    "RQ3": "Can BERTopic produce a coherent cross-domain complaint taxonomy from "
+           "heterogeneous customer reviews?",
+    "RQ4": "To what extent can retrieval-augmented answers be traced to, and "
+           "verified against, the source reviews used to produce them?",
+}
+
+
+def page_header(title: str, subtitle: str, rq: str | list[str] | None = None) -> None:
+    """
+    One header treatment for every page: title, one-line explanation, and the
+    research question the page speaks to.
+
+    Written as a helper rather than repeated per page because five pages
+    drifting into five slightly different header styles is exactly how an app
+    stops looking deliberate.
+    """
+    # Styled header rather than st.title, so pages match the landing page and
+    # scale down cleanly on a narrow screen (see frontend/theme.py). The
+    # subtitle is written as markdown by callers, so convert the inline
+    # emphasis by hand — raw HTML blocks don't get markdown processing.
+    subtitle = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", subtitle)
+    subtitle = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<i>\1</i>", subtitle)
+    subtitle = re.sub(r"`(.+?)`", r"<code>\1</code>", subtitle)
+
+    st.markdown(
+        f'''<div class="fiq-hero">
+              <h1>{title}</h1>
+              <p>{subtitle}</p>
+            </div>''',
+        unsafe_allow_html=True,
+    )
+
+    keys = [rq] if isinstance(rq, str) else (rq or [])
+    if keys:
+        labels = " · ".join(keys)
+        with st.expander(f"Research question: {labels}", expanded=False):
+            for key in keys:
+                st.markdown(f"**{key}** — {RESEARCH_QUESTIONS.get(key, '')}")
+
+    st.divider()
+
+
+def render_sources(sources: list[dict], label: str | None = None) -> None:
+    """
+    Show the reviews an answer was built from.
+
+    This is the visible half of RQ4: an answer that cannot be traced back to
+    identifiable evidence is not verifiable, whatever its faithfulness score
+    says. Defined once because the chatbot renders it in two places (replayed
+    history and the live turn) and the two had drifted apart.
+    """
+    if not sources:
+        return
+
+    n = len(sources)
+    with st.expander(label or f"{n} source review{'s' if n != 1 else ''} — the evidence for this answer"):
+        for i, source in enumerate(sources, start=1):
+            score = source.get("similarity_score")
+            bits = [
+                f"**{source.get('platform', 'unknown')}**",
+                f"★ {source.get('rating', 'N/A')}",
+                str(source.get("sentiment_label", "unknown")),
+            ]
+            if score is not None:
+                bits.append(f"similarity {score:.2f}")
+            if source.get("review_id"):
+                bits.append(f"`{source['review_id']}`")
+
+            st.markdown(f"{i}. " + " · ".join(bits))
+            st.markdown(f"> {source.get('text', '')}")
+            if i < n:
+                st.divider()
 
 
 def sidebar_status() -> None:

@@ -1,7 +1,10 @@
 """
 AI Assistant — conversational exploration of customer complaints using
-retrieval-augmented generation (RAG). Answers are grounded in retrieved
-reviews, with sources shown underneath each answer.
+retrieval-augmented generation.
+
+Answers are generated only from retrieved reviews, and every answer lists the
+reviews it drew on. That list is the point of the page rather than a detail:
+it is what makes an answer checkable, which is what RQ4 asks about.
 """
 
 import os
@@ -13,7 +16,8 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-from utils import api_post, sidebar_status
+import theme
+from utils import api_post, page_header, render_sources, sidebar_status
 
 st.set_page_config(
     page_title="Assistant | FeedbackIQ",
@@ -21,50 +25,64 @@ st.set_page_config(
     layout="wide",
 )
 
+theme.inject()
 sidebar_status()
 
-st.title("AI Assistant")
-st.write(
-    "Ask questions about customer complaint patterns. Answers are generated "
-    "only from retrieved reviews, and every answer lists the reviews it drew on."
+page_header(
+    "AI Assistant",
+    "Ask about complaint patterns across 642,692 reviews. Every answer is "
+    "generated **only** from reviews retrieved for your question, and lists them "
+    "so you can check it.",
+    rq=["RQ2", "RQ4"],
 )
 
-st.info(
-    "Try: *\"What are the top complaints on Amazon?\"* or "
-    "*\"Why are airline customers most dissatisfied?\"*"
-)
-
-st.divider()
+SUGGESTIONS = [
+    "What are the top complaints on Amazon?",
+    "Why are airline customers most dissatisfied?",
+    "What do customers say about delivery times?",
+    "Summarise the most common service complaints.",
+]
 
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
-# Replay the conversation so far
+# ── Empty state: suggestions that actually submit ───────────────────────────
+if not st.session_state.chat_messages:
+    st.caption("Start with one of these, or type your own question below.")
+    cols = st.columns(len(SUGGESTIONS))
+    for col, suggestion in zip(cols, SUGGESTIONS):
+        with col:
+            if st.button(suggestion, use_container_width=True, key=f"sug_{suggestion[:16]}"):
+                st.session_state["pending_question"] = suggestion
+                st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**What this assistant will and won't do**")
+        st.markdown(
+            "- It answers from retrieved reviews, not from what the model already knows\n"
+            "- It shows the reviews behind every answer, with platform, rating and ID\n"
+            "- It **declines** when nothing relevant clears the similarity threshold, rather "
+            "than producing a confident answer from weak evidence\n"
+            "- It rejects questions outside customer feedback before spending a retrieval"
+        )
+
+# ── Conversation so far ─────────────────────────────────────────────────────
 for message in st.session_state.chat_messages:
-
     with st.chat_message(message["role"]):
-
         if message["role"] == "assistant" and not message.get("grounded", True):
             st.warning(message["content"], icon="⚠️")
         else:
             st.write(message["content"])
+        if message["role"] == "assistant":
+            render_sources(message.get("sources", []))
 
-        if message["role"] == "assistant" and message.get("sources"):
-
-            with st.expander(f"📚 {len(message['sources'])} source review(s)"):
-                for source in message["sources"]:
-                    score = source.get("similarity_score")
-                    score_text = f" · Similarity: {score:.2f}" if score is not None else ""
-                    st.markdown(
-                        f"**{source.get('platform', 'unknown')}** · "
-                        f"⭐ {source.get('rating', 'N/A')} · "
-                        f"{source.get('sentiment_label', 'unknown')}"
-                        f"{score_text}\n\n"
-                        f"> {source.get('text', '')}"
-                    )
-                    st.markdown("---")
-
+# ── New turn ────────────────────────────────────────────────────────────────
 question = st.chat_input("Ask about customer complaints...")
+
+# A suggestion click routes through the same path as a typed question, so
+# there is only one code path to reason about.
+if not question and st.session_state.get("pending_question"):
+    question = st.session_state.pop("pending_question")
 
 if question:
 
@@ -73,7 +91,7 @@ if question:
     with st.chat_message("user"):
         st.write(question)
 
-    # Backend expects chat_history as prior turns only, in API role/content form
+    # The backend expects prior turns only, in API role/content form.
     history = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.chat_messages[:-1]
@@ -81,7 +99,7 @@ if question:
 
     with st.chat_message("assistant"):
 
-        with st.spinner("Retrieving relevant reviews and generating an answer..."):
+        with st.spinner("Retrieving relevant reviews and generating a grounded answer..."):
             response = api_post(
                 "/api/rag/chat",
                 {"question": question, "chat_history": history},
@@ -93,38 +111,46 @@ if question:
             sources = response.get("sources", [])
             grounded = response.get("grounded", True)
 
-            if not grounded:
-                st.warning(answer, icon="⚠️")
-            else:
+            if grounded:
                 st.write(answer)
+            else:
+                # A refusal is a designed outcome, not an error — show it as a
+                # distinct state so it can't be mistaken for a failed request.
+                st.warning(answer, icon="⚠️")
+                st.caption(
+                    "The pipeline declined rather than answering. Either the question "
+                    "was judged out of scope, or nothing retrieved cleared the "
+                    "similarity threshold of 0.35."
+                )
 
-            if sources:
-                with st.expander(f"📚 {len(sources)} source review(s)"):
-                    for source in sources:
-                        score = source.get("similarity_score")
-                        score_text = f" · Similarity: {score:.2f}" if score is not None else ""
-                        st.markdown(
-                            f"**{source.get('platform', 'unknown')}** · "
-                            f"⭐ {source.get('rating', 'N/A')} · "
-                            f"{source.get('sentiment_label', 'unknown')}"
-                            f"{score_text}\n\n"
-                            f"> {source.get('text', '')}"
-                        )
-                        st.markdown("---")
+            render_sources(sources)
 
-            st.session_state.chat_messages.append(
-                {"role": "assistant", "content": answer, "sources": sources, "grounded": grounded}
-            )
+            st.session_state.chat_messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources,
+                "grounded": grounded,
+            })
 
         else:
             error_msg = "Sorry, I couldn't reach the backend to answer that."
             st.write(error_msg)
-            st.session_state.chat_messages.append(
-                {"role": "assistant", "content": error_msg, "sources": [], "grounded": True}
-            )
+            st.session_state.chat_messages.append({
+                "role": "assistant", "content": error_msg,
+                "sources": [], "grounded": True,
+            })
 
-st.divider()
-
-if st.button("Clear conversation"):
-    st.session_state.chat_messages = []
-    st.rerun()
+# ── Footer controls ─────────────────────────────────────────────────────────
+if st.session_state.chat_messages:
+    st.divider()
+    left, right = st.columns([1, 5])
+    with left:
+        if st.button("Clear conversation", use_container_width=True):
+            st.session_state.chat_messages = []
+            st.rerun()
+    with right:
+        st.caption(
+            "Measured on five questions: 0.540 faithfulness with source attribution, "
+            "against an ungrounded baseline scoring higher on relevancy (0.753 vs 0.610) "
+            "but with nothing to check it against. See the Evaluation page."
+        )

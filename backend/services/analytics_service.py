@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from collections import Counter
@@ -42,6 +43,88 @@ KEYWORDS_FILE = os.path.join("data", "results", "keywords", "top_keywords.json")
 # the dashboard says so on the chart.
 KEYWORD_SAMPLE_SIZE = 25_000
 KEYWORD_SAMPLE_SEED = 42
+
+# ---------------------------------------------------------------------------
+# Keyword phrase filtering.
+#
+# spaCy's .noun_chunks is correct but not useful on its own: pronouns are noun
+# phrases, so an unfiltered count of a review corpus returns "they", "you",
+# "that", "she" as the most frequent "business keywords". Twelve of the top
+# fifteen were pronouns before this filter existed.
+#
+# Three rules, applied in order:
+#   1. Drop chunks headed by a pronoun or determiner  (they / you / this one)
+#   2. Strip a leading determiner                     ("the food" -> "food")
+#   3. Drop anything left that is a stopword or too short
+#
+# Rule 2 matters more than it looks: without it "the food", "a food" and
+# "food" compete as separate entries and each ranks lower than their combined
+# frequency deserves.
+#
+# Bump KEYWORD_FILTER_VERSION whenever these rules change. The precomputed
+# file records the version it was built with, and _load_precomputed_keywords()
+# refuses a file built by an older one — otherwise a stale file would keep
+# serving unfiltered counts with no sign that anything was wrong.
+# ---------------------------------------------------------------------------
+KEYWORD_FILTER_VERSION = 2
+
+MIN_PHRASE_CHARS = 3
+
+_LEADING_DETERMINER = re.compile(
+    r"^(?:the|a|an|my|your|our|their|his|her|its|this|that|these|those|"
+    r"some|any|no|every|another|each)\s+",
+    re.IGNORECASE,
+)
+
+KEYWORD_STOPWORDS = frozenset({
+    # pronouns and pro-forms that survive the POS check as multi-word chunks
+    "they", "you", "that", "this", "she", "he", "it", "we", "i", "me", "him",
+    "her", "them", "us", "who", "what", "which", "there", "these", "those",
+    "all", "some", "any", "none", "one", "ones", "another", "others",
+    "something", "anything", "nothing", "everything", "someone", "anyone",
+    "everyone", "nobody", "somebody", "anybody", "everybody",
+    "myself", "yourself", "himself", "herself", "itself", "ourselves",
+    "themselves", "yourselves",
+    # contentless nouns that rank high and say nothing about the complaint.
+    # "time" is deliberately NOT here — "wait time", "delivery time" and
+    # plain "time" are all informative in a feedback corpus.
+    "thing", "things", "way", "ways", "lot", "lots", "bit", "kind", "sort",
+    "part", "parts", "case", "cases", "point", "points",
+    # bare determiners. Rule 1 normally catches these via the POS tag, but a
+    # mis-tagged single-word chunk would otherwise slip through rule 2, whose
+    # regex only strips a determiner when something follows it.
+    "the", "a", "an", "this", "that", "these", "those", "my", "your", "our",
+    "their", "his", "its", "every", "each",
+})
+
+
+def normalise_phrase(chunk) -> str | None:
+    """
+    Turn one spaCy noun chunk into a keyword, or None if it should be dropped.
+
+    Shared by the live path in get_top_keywords() and by
+    scripts/precompute_keywords.py — deliberately one function, so the two
+    cannot drift apart and start reporting different counts for the same
+    corpus under the same chart.
+    """
+    # 1. pronoun- or determiner-headed chunks carry no topical content
+    if chunk.root.pos_ in ("PRON", "DET"):
+        return None
+
+    text = chunk.text.lower().strip()
+
+    # 2. "the food" and "food" should be the same keyword
+    text = _LEADING_DETERMINER.sub("", text).strip()
+
+    # 3. what's left has to be a real word
+    if len(text) < MIN_PHRASE_CHARS:
+        return None
+    if text in KEYWORD_STOPWORDS:
+        return None
+    if not any(ch.isalpha() for ch in text):
+        return None
+
+    return text
 
 
 @lru_cache(maxsize=1)
@@ -174,9 +257,23 @@ def _load_precomputed_keywords() -> dict | None:
         log.error("Precomputed keyword file has no 'keywords' object: %s", KEYWORDS_FILE)
         return None
 
+    # Refuse a file built by an older version of the phrase filter. Without
+    # this check a stale file keeps serving counts the current rules would
+    # never produce — e.g. pronoun-dominated results from before the filter
+    # existed — and nothing anywhere indicates a mismatch.
+    file_version = payload.get("filter_version", 1)
+    if file_version != KEYWORD_FILTER_VERSION:
+        log.warning(
+            "Precomputed keywords were built with filter version %s but the "
+            "current filter is version %s. Ignoring the file and sampling "
+            "instead. Re-run scripts/precompute_keywords.py to refresh it.",
+            file_version, KEYWORD_FILTER_VERSION,
+        )
+        return None
+
     log.info(
-        "Loaded precomputed keywords generated %s",
-        payload.get("generated_at", "at an unknown time"),
+        "Loaded precomputed keywords generated %s (filter v%s)",
+        payload.get("generated_at", "at an unknown time"), file_version,
     )
 
     return payload
@@ -264,12 +361,17 @@ def get_top_keywords(
     # nlp.pipe() batches internally instead of paying full per-call
     # pipeline overhead for each row one at a time — same output,
     # meaningfully faster.
+    #
+    # normalise_phrase() is the same function scripts/precompute_keywords.py
+    # uses, so the sampled fallback and the precomputed file apply identical
+    # rules. If they didn't, the chart's own caption would be misleading —
+    # the two bases would differ by more than sample size.
     for doc in _get_nlp().pipe(texts.tolist(), batch_size=200):
 
         counter.update(
-            chunk.text.lower().strip()
-            for chunk in doc.noun_chunks
-            if len(chunk.text) > 2
+            phrase
+            for phrase in (normalise_phrase(chunk) for chunk in doc.noun_chunks)
+            if phrase is not None
         )
 
     return [

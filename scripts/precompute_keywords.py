@@ -39,6 +39,10 @@ import spacy
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from backend.services.analytics_service import (  # noqa: E402
+    KEYWORD_FILTER_VERSION,
+    normalise_phrase,
+)
 from config import settings  # noqa: E402
 
 # Keep more than the dashboard asks for (it requests 30, the API allows up to
@@ -52,12 +56,19 @@ BUCKETS = [None, "positive", "negative", "neutral"]
 OUTPUT_DIR = os.path.join("data", "results", "keywords")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "top_keywords.json")
 
-MIN_PHRASE_CHARS = 2   # matches the runtime filter in analytics_service
 BATCH_SIZE = 200
 
 
 def count_phrases(nlp, texts: list[str]) -> Counter:
-    """Noun-chunk frequencies over a list of texts."""
+    """
+    Noun-chunk frequencies over a list of texts.
+
+    Phrase filtering comes from normalise_phrase() in analytics_service, not
+    from a copy here. That is deliberate: the API falls back to computing
+    these live from a sample when this file is missing, and if the two used
+    different rules the dashboard would report different numbers for the same
+    corpus depending on which path served the request.
+    """
 
     counter: Counter = Counter()
     started = time.time()
@@ -65,9 +76,9 @@ def count_phrases(nlp, texts: list[str]) -> Counter:
     for i, doc in enumerate(nlp.pipe(texts, batch_size=BATCH_SIZE), start=1):
 
         counter.update(
-            chunk.text.lower().strip()
-            for chunk in doc.noun_chunks
-            if len(chunk.text) > MIN_PHRASE_CHARS
+            phrase
+            for phrase in (normalise_phrase(chunk) for chunk in doc.noun_chunks)
+            if phrase is not None
         )
 
         if i % 25_000 == 0:
@@ -131,6 +142,10 @@ def main() -> int:
         "source_file": settings.DATA_PATH,
         "basis": "corpus",
         "spacy_model": "en_core_web_sm",
+        # Recorded so the API can refuse a file built by an older filter
+        # rather than silently serving counts the current rules wouldn't
+        # produce. See KEYWORD_FILTER_VERSION in analytics_service.py.
+        "filter_version": KEYWORD_FILTER_VERSION,
         "top_n": TOP_N,
         "review_counts": counts,
         "keywords": results,

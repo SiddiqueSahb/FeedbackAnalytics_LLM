@@ -50,7 +50,17 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = ""
     GROQ_API_KEY:     str   = ""
     USE_GROQ:         bool  = True
-    GROQ_MODEL:       str   = "llama-3.1-8b-instant"
+    # nlp/summariser.py binds its output schema with with_structured_output(),
+    # which Groq implements as a tool call. Models that write the JSON as
+    # ordinary content instead — openai/gpt-oss-20b does — get rejected with
+    # `tool_use_failed`. _recover_from_failed_tool_call() in that module pulls
+    # the payload back out of the error and validates it against the same
+    # schema, so both kinds of model work.
+    #
+    # NOTE: the dissertation documents llama-3.1-8b-instant as the generator.
+    # Any results produced under a different model are not comparable with the
+    # figures reported there.
+    GROQ_MODEL:       str   = "openai/gpt-oss-20b"
     LLM_TEMPERATURE:  float = 0.2
 
     #Zero-shot complaint categorisation
