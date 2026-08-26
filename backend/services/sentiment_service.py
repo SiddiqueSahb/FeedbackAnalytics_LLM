@@ -132,12 +132,7 @@ def compare_models(text: str) -> dict:
 
 
 def predict_only(text: str, model: str = "distilbert") -> dict:
-    """
-    Sentiment only — skips categorisation, retrieval and the LLM call.
-
-    Used by the /predict and /batch-predict endpoints where the caller
-    just wants a fast label, not the full business-analysis pipeline.
-    """
+    """Sentiment only — skips categorisation, retrieval and the LLM call. Used by /predict and /batch-predict for a fast label."""
 
     if not text.strip():
         raise ValueError("Review text cannot be empty.")
@@ -146,12 +141,7 @@ def predict_only(text: str, model: str = "distilbert") -> dict:
 
 
 def batch_predict(texts: list[str], model: str = "distilbert") -> list[dict]:
-    """
-    Score a list of review texts with one model.
-
-    Each text is scored independently, so one bad row does not fail the
-    whole batch — it is reported with an "error" label instead.
-    """
+    """Score a list of review texts with one model. A bad row gets an "error" label instead of failing the whole batch."""
 
     results = []
 

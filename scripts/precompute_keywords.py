@@ -1,28 +1,17 @@
 """
 Precompute the dashboard's keyword frequencies.
 
-Why this exists
----------------
-`get_top_keywords()` in backend/services/analytics_service.py ran spaCy over
-every review in the corpus on the first request: 642,692 rows averaging ~41
-words is roughly 26 million words through the tagger and dependency parser
-(the parser is what `.noun_chunks` needs, and it's the expensive half). On a
-single CPU core that's tens of minutes, so the dashboard's `/api/analytics/
-keywords` call never returned inside any sane HTTP timeout and the page
-appeared to hang.
+get_top_keywords() used to run spaCy over the full corpus (~26M words) on the
+first API request -- tens of minutes, hanging the page. This script does that
+work once, offline, and writes the counts to JSON so the endpoint just reads
+the file.
 
-Nothing about that work needs to happen per request — the corpus is static.
-This script does it once, offline, over the *full* corpus, and writes the
-counts to JSON. The endpoint then reads the file and answers instantly, with
-exact corpus counts rather than an approximation.
-
-Run it after any change to data/processed/reviews_unified.parquet:
+Run after any change to data/processed/reviews_unified.parquet:
 
     python scripts/precompute_keywords.py
 
-Expect it to take a while — it is doing the full 26M words. Progress is
-printed per bucket. If the output file is absent the endpoint falls back to
-a clearly-labelled sample, so the dashboard still works before you run this.
+Takes a while (full 26M words). If the output file is missing, the endpoint
+falls back to a sample.
 """
 
 from __future__ import annotations
@@ -49,8 +38,7 @@ from config import settings  # noqa: E402
 # 100) so the same file serves every reasonable `n` without recomputing.
 TOP_N = 200
 
-# One bucket per value the dashboard's sentiment filter can take, plus the
-# unfiltered case.
+# One bucket per sentiment filter value, plus unfiltered (None)
 BUCKETS = [None, "positive", "negative", "neutral"]
 
 OUTPUT_DIR = os.path.join("data", "results", "keywords")
@@ -106,8 +94,7 @@ def main() -> int:
     )
     print(f"  {len(df):,} rows", flush=True)
 
-    # Same pipeline configuration the service uses, so the counts this script
-    # produces are the ones the service would have produced itself.
+    # Same pipeline config as the service, so counts match what it would produce
     print("Loading spaCy (en_core_web_sm, ner + lemmatizer disabled) ...", flush=True)
     nlp = spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
 
@@ -142,9 +129,7 @@ def main() -> int:
         "source_file": settings.DATA_PATH,
         "basis": "corpus",
         "spacy_model": "en_core_web_sm",
-        # Recorded so the API can refuse a file built by an older filter
-        # rather than silently serving counts the current rules wouldn't
-        # produce. See KEYWORD_FILTER_VERSION in analytics_service.py.
+        # Lets the API refuse a file built by an older filter version
         "filter_version": KEYWORD_FILTER_VERSION,
         "top_n": TOP_N,
         "review_counts": counts,

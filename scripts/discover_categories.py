@@ -1,49 +1,22 @@
 """
-Dynamic Complaint Category Discovery using BERTopic + cross-platform taxonomy merge.
-======================================================================================
-Reads real review data, groups similar complaints together automatically per
-platform, then MERGES near-duplicate topics across platforms into a single,
-consolidated business taxonomy before an LLM names the merged clusters.
-
-Why the merge stage exists (see docs/methodology_review.md for the full writeup):
-  BERTopic topics are a statistical artifact of clustering resolution, not a
-  business taxonomy. Converting each topic 1:1 into a category label produces
-  40-60 overlapping near-synonym categories (e.g. "Flight Boarding Delays" /
-  "Flight Schedule Failures" / "Flight Rescheduling Issues" are the same
-  complaint). Worse, discovering categories separately per platform and then
-  concatenating the raw per-platform files at inference time mixes
-  platform-irrelevant categories into every prediction (an airline category
-  showing up as a candidate for an Amazon electronics review).
-
-  This script fixes both problems:
-    1. Runs BERTopic per platform (as before) so platform-specific vocabulary
-       is captured well.
-    2. Computes a true topic centroid (mean of member document embeddings) for
-       every topic, in every platform.
-    3. Merges near-duplicate topics ACROSS ALL PLATFORMS via agglomerative
-       clustering on centroid cosine distance, down to a deliberate target
-       category count (--target-categories), instead of letting BERTopic's
-       nr_topics/min_topic_size hyperparameters implicitly decide the count.
-    4. Names each MERGED cluster with a single LLM call per cluster that is
-       given the list of category names already assigned so far, so it
-       cannot produce a near-synonym of an existing category. Each category
-       gets a name + one-sentence description + example phrases (used later
-       by categoriser.py as a much richer zero-shot hypothesis than a bare
-       3-word label).
-    5. Saves ONE consolidated taxonomy file used by categoriser.py, plus the
-       raw per-platform topic dumps for dissertation-appendix auditing.
+Dynamic complaint category discovery: BERTopic per platform, then merges
+near-duplicate topics ACROSS platforms into one consolidated taxonomy before
+an LLM names each merged cluster. Raw per-platform BERTopic topics are a
+clustering artifact, not a business taxonomy (lots of near-synonym topics,
+plus platform-irrelevant categories leaking into other platforms' predictions
+if used unmerged) -- see docs/methodology_review.md for the full rationale.
 
 Usage:
-    python scripts/discover_categories.py                       # full pipeline: discover -> merge -> name (all platforms, negative)
+    python scripts/discover_categories.py                       # discover -> merge -> name, all platforms
     python scripts/discover_categories.py --sentiment negative
     python scripts/discover_categories.py --target-categories 18
-    python scripts/discover_categories.py --platform amazon     # single-platform raw discovery only, no merge (audit/exploration mode)
-    python scripts/discover_categories.py --use-llm             # (single-platform mode) use LLM for raw per-topic labels instead of rule-based
+    python scripts/discover_categories.py --platform amazon     # audit mode: single platform, no merge
+    python scripts/discover_categories.py --use-llm             # (audit mode) LLM labels instead of rule-based
 
-Outputs (multi-platform / default mode):
-    data/processed/complaint_categories_all_<sentiment>.json   <- consolidated taxonomy, loaded by categoriser.py
-    data/processed/taxonomy_merge_info_<sentiment>.json        <- merge diagnostics for dissertation (coherence, cluster membership)
-    data/processed/bertopic_info_<platform>_<sentiment>.json   <- raw per-platform topics (audit trail, one per platform)
+Outputs (default multi-platform mode):
+    data/processed/complaint_categories_all_<sentiment>.json   <- consolidated taxonomy, used by categoriser.py
+    data/processed/taxonomy_merge_info_<sentiment>.json        <- merge diagnostics
+    data/processed/bertopic_info_<platform>_<sentiment>.json   <- raw per-platform topics (audit trail)
 
 Author: Mohammad Asim | MSc Dissertation 2026
 """
@@ -54,9 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 from bertopic.representation import KeyBERTInspired
 from langdetect import detect, LangDetectException, DetectorFactory
-DetectorFactory.seed = 0  # langdetect's classifier is otherwise non-deterministic run-to-run,
-                          # which silently changes which reviews survive filter_english() and
-                          # invalidates any cached embeddings keyed on that filtered text count.
+DetectorFactory.seed = 0  # otherwise non-deterministic, which would invalidate cached embeddings
 from groq import Groq
 
 import json
@@ -75,13 +46,7 @@ import spacy
 nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 
 PLATFORMS = ["amazon", "yelp", "twitter_airline"]
-DEFAULT_TARGET_CATEGORIES = 24  # raised from 18: with the finer min_topic_size (now
-                                 # typically yielding 100+ raw topics vs ~54 before),
-                                 # merging that far down forced very unequal cluster
-                                 # sizes and produced an oversized catch-all category
-                                 # that dominated classification. Not a guaranteed fix —
-                                 # the real test is the gold-set evaluation, not this
-                                 # number alone.
+DEFAULT_TARGET_CATEGORIES = 24  # raised from 18 -- 18 produced an oversized catch-all cluster
 
 # Fallback static categories (used if BERTopic fails entirely)
 STATIC_FALLBACK: list[str] = [
@@ -95,10 +60,7 @@ STATIC_FALLBACK: list[str] = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 helpers — language filter, dynamic min topic size, noise filter
-# (unchanged in spirit from the original single-platform version)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_english(texts: list[str]) -> list[str]:
     """Removes non-English reviews using langdetect. Short texts (<4 words) kept as-is."""
@@ -123,17 +85,10 @@ def filter_english(texts: list[str]) -> list[str]:
 
 
 def dynamic_min_topic_size(n_texts: int) -> int:
-    """
-    Scale minimum topic size with corpus size: 0.15% of corpus, capped 30-300.
-
-    Was 0.5% capped 50-500 — too coarse in practice: on a real ~58k-review
-    corpus it produced a min_cluster_size of 289, which caused HDBSCAN to
-    collapse everything into just 2 topics (observed on amazon/negative).
-    A smaller floor biases toward finer-grained topics, which the merge
-    stage (merge_topics) is specifically designed to consolidate afterward —
-    better to over-split here and merge deliberately than to under-split and
-    silently lose whole complaint types.
-    """
+    """Scale min topic size with corpus size: 0.15% of corpus, capped 30-300.
+    Was 0.5% capped 50-500 -- that collapsed a 58k-review corpus (min_size=289)
+    into just 2 HDBSCAN topics. Over-splitting here is fine; merge_topics()
+    consolidates afterward."""
     size = int(n_texts * 0.0015)
     return max(30, min(300, size))
 
@@ -166,15 +121,9 @@ def filter_noise_topics(topic_details: list[dict]) -> list[dict]:
         else:
             after_s1.append(detail)
 
-    # Dominance alone is NOT a valid noise signal. With ngram_range=(1,2), a
-    # genuinely coherent, single-concept topic (e.g. "Flight Cancelled, Cancelled
-    # Flight, Flights Cancelled") will always show one word dominating its keyword
-    # list, because that word IS the topic — that's a feature, not degeneracy.
-    # This used to drop exactly these topics (flight cancellations, hold-time
-    # complaints, gate-agent complaints) purely for being monothematic. A
-    # dominant word is only a real degeneracy signal when it's ALSO a cross-topic
-    # noise word from Stage 1 (generic across the whole corpus, not just
-    # descriptive of this one topic).
+    # Dominance alone isn't noise -- a coherent single-concept topic (e.g. "flight
+    # cancelled") naturally has one dominant word. Only flag it if that word is
+    # also a cross-topic noise word from Stage 1.
     after_s2 = []
     for detail in after_s1:
         word_freq = Counter(
@@ -288,10 +237,7 @@ def llm_convert_to_category(keywords: list[tuple[str, float]]) -> str:
     return clean_topic_label(keywords)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — BERTopic run per platform, now also returns topic centroids +
-# representative example documents (needed by the merge stage).
-# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — BERTopic per platform; also returns topic centroids + example docs for the merge stage
 
 def run_bertopic(
     texts: list[str],
@@ -337,14 +283,9 @@ def run_bertopic(
 
     umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric="cosine", random_state=42, low_memory=True)
     hdbscan_model = HDBSCAN(min_cluster_size=min_topic_size, min_samples=10, metric="euclidean", cluster_selection_method="eom", prediction_data=True)
-    # NOTE: this vectorizer fits on topic-level aggregated text (one pseudo-document
-    # per topic), not individual reviews — min_df/max_df here constrain how many
-    # TOPICS a word must appear across, not how many reviews. With nr_topics="auto",
-    # BERTopic's internal reduction step can shrink the topic count low enough that
-    # a strict min_df=5 makes max_df*topic_count < min_df, crashing sklearn
-    # ("max_df corresponds to < documents than min_df"). min_df=1/max_df=1.0 removes
-    # that failure mode entirely; c-TF-IDF's IDF weighting already downweights
-    # near-universal terms, so little filtering quality is lost.
+    # min_df/max_df count TOPICS here, not reviews (fits on per-topic aggregated
+    # text). A stricter min_df can crash sklearn once nr_topics="auto" shrinks the
+    # topic count, so keep it permissive.
     vectorizer_model = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=1, max_df=1.0)
 
     print(f"Creating BERTopic model with {n_topics} topics")
@@ -396,8 +337,7 @@ def run_bertopic(
         keywords = [word for word, _ in top_words_raw[:10]]
         count = int(row.get("Count", 0))
 
-        # Topic centroid — true mean of member document embeddings, not a
-        # keyword-string embedding. This is what the merge stage clusters on.
+        # True mean of member doc embeddings (not a keyword-string embedding) -- this is what merge_topics clusters on
         member_idx = np.where(topics == topic_id)[0]
         if len(member_idx) > 0:
             centroid = embeddings[member_idx].mean(axis=0)
@@ -425,10 +365,7 @@ def run_bertopic(
     return categories, topic_details
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 3 — cross-platform merge: cluster topic centroids down to a target
-# number of business categories.
-# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — cross-platform merge: cluster topic centroids into a target number of categories
 
 def merge_topics(all_topics: list[dict], target_categories: int) -> list[dict]:
     """
@@ -501,8 +438,7 @@ def merge_topics(all_topics: list[dict], target_categories: int) -> list[dict]:
             "centroid": merged_centroid.tolist(),
         })
 
-    # Largest (most-evidenced) clusters first — named first so the LLM's
-    # "already used" list is seeded by the most important categories.
+    # Largest clusters first, so the LLM's "already used" list is seeded by the most important categories
     merged.sort(key=lambda c: -c["count"])
     return merged
 
@@ -523,21 +459,15 @@ def taxonomy_coherence(merged: list[dict]) -> float:
     return float(upper.mean())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 4 — name each merged cluster with a context-aware LLM call.
-# ─────────────────────────────────────────────────────────────────────────────
+# Stage 4 — name each merged cluster with a context-aware LLM call
 
 def llm_name_merged_cluster(
     keywords: list[str],
     example_docs: list[str],
     existing_names: list[str],
 ) -> dict:
-    """
-    Names ONE merged cluster. Critically, this call is given the list of
-    category names already assigned to previous (larger) clusters, so it can
-    avoid producing a near-synonym — this is what prevents the "Travel
-    Experience Failures" / "Travel Experience Issues" / "Travel Disruption
-    Issues" duplication seen in the original per-topic-isolated naming.
+    """Names ONE merged cluster, given already-used names so it avoids near-synonyms
+    (e.g. "Travel Experience Failures" vs "Travel Experience Issues").
 
     Returns {"name": str, "description": str, "exemplars": [str, ...]}
     """
@@ -618,8 +548,7 @@ def name_all_clusters(merged: list[dict]) -> list[dict]:
             "source_topic_ids": cluster["source_topic_ids"],
         })
 
-    # Safety-net dedup: exact (case-insensitive) name collisions get merged,
-    # in case the LLM ever ignores the "existing names" instruction.
+    # Safety net: merge exact-name collisions in case the LLM ignores "existing names"
     seen: dict[str, dict] = {}
     for cat in named:
         key = cat["category"].strip().lower()
@@ -634,9 +563,7 @@ def name_all_clusters(merged: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Orchestration
-# ─────────────────────────────────────────────────────────────────────────────
 
 def discover_platform_topics(df: pd.DataFrame, platform: str, sentiment_tag: str, args) -> list[dict]:
     """Runs the single-platform BERTopic discovery pipeline and returns raw topic dicts
@@ -661,11 +588,9 @@ def discover_platform_topics(df: pd.DataFrame, platform: str, sentiment_tag: str
     n_topics = args.topics if args.topics else "auto"
     cache_path = f"data/processed/embeddings_cache_{platform}_{sentiment_tag}.npy"
 
-    # Auto-retry with a shrinking min_topic_size if HDBSCAN collapses the corpus
-    # into too few topics (observed on real data: 289 collapsed 57,931 amazon
-    # reviews into just 2 topics). Retrying is cheap — embeddings are cached, so
-    # only UMAP+HDBSCAN reruns, not re-encoding. This removes the need to
-    # manually diagnose and rerun with a smaller --min-topic-size by hand.
+    # Auto-retry with a shrinking min_topic_size if HDBSCAN collapses into too few
+    # topics (min_size=289 once collapsed 58k amazon reviews into 2). Cheap retry --
+    # embeddings are cached, only UMAP+HDBSCAN rerun.
     MIN_TOPIC_FLOOR = 15
     MIN_RAW_TOPICS_ACCEPTABLE = 5
     attempt = 0
@@ -772,12 +697,8 @@ TEST_REVIEWS = [
 
 
 def _run_classification_smoke_test(sentiment_tag: str) -> None:
-    """
-    Immediately loads the taxonomy just written and classifies a fixed set of
-    test reviews with it, in the SAME process/run — so one command shows both
-    the discovered taxonomy AND whether classification looks right, instead of
-    needing a separate `python nlp/categoriser.py` run and a second round-trip.
-    """
+    """Loads the taxonomy just written and classifies TEST_REVIEWS in the same run,
+    so one command shows both the taxonomy and whether classification looks right."""
     print(f"\n{'=' * 60}")
     print(f"  Smoke-testing the new taxonomy against fixed test reviews")
     print(f"{'=' * 60}")

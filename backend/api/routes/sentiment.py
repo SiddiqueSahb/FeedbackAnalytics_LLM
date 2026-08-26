@@ -103,13 +103,9 @@ async def analyse(request: ReviewRequest) -> AnalyseResponse:
         log.exception("Review analysis failed.")
         raise HTTPException(status_code=500, detail="Review analysis failed.")
 
-    # analyse_review() returns a flat dict (summary/keywords/... at the top
-    # level); AnalyseResponse expects those nested under "analysis". Reshape
-    # here rather than touching nlp/summariser.py.
-    #
-    # categoriser.categorise() names its confidence field "score", but its
-    # own error fallback in sentiment_service.py uses "confidence" instead —
-    # accept either so a mismatch between the two doesn't turn into a 500.
+    # Reshape analyse_review()'s flat dict into AnalyseResponse's nested
+    # "analysis" field. Confidence is "score" normally but "confidence" in
+    # the error fallback path — accept either.
     categories = [
         {
             "category": cat.get("category", "Unknown"),

@@ -1,22 +1,13 @@
 """
-Generate the two dissertation figures that are not produced by any other script.
+Generates the two dissertation figures not produced elsewhere:
+Fig 4.1 - review length distribution by platform (evidence for the
+cross-domain register claim), Fig 4.2 - confusion matrices for four
+models side by side (VADER/RoBERTa behaving as binary classifiers,
+per Table 4.7).
 
-  Figure 4.1 — Review length distribution by platform.
-      The cross-domain argument in this dissertation rests on the claim that
-      the three sources differ in register. This figure is the evidence for
-      that claim, so it is worth producing properly.
+Saved to data/results/figures/ at 300 dpi, colour-blind friendly palette.
 
-  Figure 4.2 — Confusion matrices for four models, side by side.
-      Table 4.7 states numerically that VADER and RoBERTa behave as binary
-      classifiers on a three-class task. This makes it visible: the neutral
-      column is almost empty for both, and full for the two models that
-      learned from the data.
-
-Both are saved to data/results/figures/ at 300 dpi with a colour-blind
-friendly palette.
-
-Usage:
-    python evaluate/generate_figures.py
+Usage: python evaluate/generate_figures.py
 """
 
 from __future__ import annotations
@@ -60,22 +51,16 @@ def pretty(label: str) -> str:
 
 
 def figure_review_length() -> None:
-    """
-    Figure 4.1 — review length by platform.
-
-    Two panels. The left panel is a box plot on a log scale, which is needed
-    because Amazon reviews have a long tail that would otherwise flatten the
-    Twitter box to a line. The right panel gives the median word count as
-    plain bars, since that is the number the text actually quotes.
-    """
+    """Fig 4.1: review length by platform. Log-scale box plot (Amazon's long
+    tail would flatten Twitter otherwise) + median word count bars (the
+    number the text quotes)."""
     data_path = PROJECT_ROOT / settings.DATA_PATH
     logger.info("Loading %s", data_path)
     df = pd.read_parquet(data_path, columns=["platform", "text"])
     df = df.dropna(subset=["text"])
 
-    # Counting words across all 642,692 reviews is slow and unnecessary for a
-    # distribution plot. A fixed-seed sample of up to 40,000 per platform gives
-    # a stable picture of the shape and runs in seconds.
+    # Sample instead of counting all 642,692 reviews - same shape, much
+    # faster (seed 42, up to 40k per platform).
     sample = pd.concat([
         group.sample(n=min(len(group), 40_000), random_state=42)
         for _, group in df.groupby("platform")
@@ -125,18 +110,9 @@ def figure_review_length() -> None:
 
 
 def figure_confusion_matrices() -> None:
-    """
-    Figure 4.2 — confusion matrices for four models.
-
-    Ordered deliberately: the two off-the-shelf models on the top row, the
-    two that learned from this corpus on the bottom. Values are row-normalised
-    percentages so the panels are comparable despite differing class supports,
-    and the point of the figure is the near-empty middle column top row.
-    """
-    # All five models are shown. Grouping is by whether the model learned
-    # anything from this corpus: the top row did not, the bottom row did.
-    # Omitting a model from a five-model comparison would invite the question
-    # of why, so the sixth panel is left free for the colour bar instead.
+    """Fig 4.2: confusion matrices, row-normalised %. Top row = off-the-shelf
+    models, bottom row = models trained on this corpus."""
+    # All five models shown; sixth panel left free for the colour bar.
     models = [
         ("vader", "VADER (lexicon)"),
         ("roberta_(pre-trained)", "RoBERTa (pretrained)"),
@@ -150,8 +126,7 @@ def figure_confusion_matrices() -> None:
     cmap = LinearSegmentedColormap.from_list("okabe_blue", ["#FFFFFF", "#0072B2"])
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-    # Generous horizontal spacing: without it the y-axis label of one panel
-    # collides with the right edge of its neighbour.
+    # Extra horizontal spacing - otherwise y-axis labels collide with neighbours.
     fig.subplots_adjust(wspace=0.35, hspace=0.35, top=0.86)
     spacer_ax = axes[0, 2]
 
@@ -177,8 +152,7 @@ def figure_confusion_matrices() -> None:
         ax.set_xticks(range(len(labels)), labels)
         ax.set_yticks(range(len(labels)), labels)
         ax.set_xlabel("Predicted")
-        # Only the leftmost panel in each row carries the y-label, otherwise
-        # it overlaps the neighbouring panel.
+        # Only leftmost panel per row gets the y-label (avoids overlap).
         if idx % 3 == 0:
             ax.set_ylabel("True")
         ax.set_title(title, fontsize=11, pad=8)
@@ -195,8 +169,7 @@ def figure_confusion_matrices() -> None:
                  "Bottom row: models trained on it.",
                  fontsize=13)
 
-    # Colour bar occupies the lower part of the free top-right slot; the
-    # reading note sits above it so the two do not collide.
+    # Colour bar in the lower part of the free slot; reading note sits above it.
     cbar = fig.colorbar(im, ax=spacer_ax, fraction=0.28, pad=0.02,
                         anchor=(0.0, 0.0), shrink=0.75,
                         label="% of true class")

@@ -15,7 +15,7 @@ from config import settings
 
 
 def main():
-    # ── Load data ─────────────────────────────────────────────────────────────
+    # Load data
     if not os.path.exists(settings.DATA_PATH):
         print(f"  Data not found at {settings.DATA_PATH}")
         print("    Run: python scripts/preprocess.py first")
@@ -30,7 +30,7 @@ def main():
     metadata = df[meta_cols].to_dict("records")
     print(f"    Loaded {len(texts):,} reviews")
 
-    # ── Generate embeddings ───────────────────────────────────────────────────
+    # Generate embeddings
     print(f"\n  Generating embeddings with {settings.EMBEDDING_MODEL}...")
     print("    This may take a few minutes...")
     from sentence_transformers import SentenceTransformer
@@ -45,13 +45,13 @@ def main():
 
     os.makedirs("data/embeddings", exist_ok=True)
 
-    # ── Save raw embeddings ───────────────────────────────────────────────────
+    # Save embeddings
     np.save(settings.EMBED_PATH, embeddings)
     print(f"\n  Embeddings saved → {settings.EMBED_PATH}")
 
      
 
-    # ── Build LangChain FAISS index ──────────────────────────────────────────
+    # Build LangChain FAISS index
     print("\n Building LangChain FAISS index...")
     try:
         from langchain_community.vectorstores import FAISS as LangFAISS

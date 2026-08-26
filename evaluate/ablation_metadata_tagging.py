@@ -1,43 +1,23 @@
 """
-Ablation: Metadata Tagging in the RAG Context
+Ablation: does tagging each retrieved review with platform/rating/sentiment
+metadata (rag/pipeline.py's DOCUMENT_PROMPT) actually make RAG_PROMPT's
+grounding rules enforceable, as Chapter 3 claims? Never measured before.
 
-Author : Mohammad Asim Siddique
+Same 5 questions as evaluate_llm_vs_rag.py, run twice:
+  Condition A ("tagged")   - current default: [Platform: ... | Rating: ...
+                              | Sentiment: ...] prefix on each review.
+  Condition B ("untagged") - same retrieval, raw review text only.
 
-Chapter 3 argues that tagging each retrieved review with its
-platform/rating/sentiment metadata before it reaches the generator LLM
-(rag/pipeline.py's DOCUMENT_PROMPT) is what makes RAG_PROMPT's grounding
-rules ("only cite platforms present in context") enforceable rather than
-aspirational. That claim has never been measured -- this script measures it.
+Retrieval is unchanged between conditions, so any RAGAS delta reflects the
+effect of tagging on generation, not retrieval - Context Precision/Recall
+should barely move; Faithfulness and Answer Relevancy are the interesting
+ones.
 
-Same 5 questions as evaluate_llm_vs_rag.py, run through the RAG pipeline
-twice:
+Toggled by monkeypatching rag.pipeline.DOCUMENT_PROMPT for Condition B's
+loop, then restoring it - doesn't touch rag/pipeline.py itself.
 
-  Condition A ("tagged")    -- current default. Each review enters the LLM's
-                                context prefixed with
-                                [Platform: ... | Rating: ... | Sentiment: ...]
-                                exactly as rag/pipeline.py builds it.
-  Condition B ("untagged")  -- identical retrieval, but the generator LLM
-                                sees only the raw review text, no metadata
-                                prefix.
-
-Retrieval is unchanged between conditions (same SIMILARITY_THRESHOLD gate,
-same MMR selection) -- only what the generator is shown differs. So any
-RAGAS score difference between the two conditions reflects the effect of
-tagging on generation, not retrieval quality. Context Precision and Context
-Recall are expected to move little or not at all for that reason; the
-interesting deltas are Faithfulness and Answer Relevancy.
-
-Toggled by monkeypatching rag.pipeline.DOCUMENT_PROMPT for the duration of
-Condition B's generation loop, then restoring the original -- this file
-does NOT edit rag/pipeline.py. Python resolves the global name
-`DOCUMENT_PROMPT` inside ask() against the module's __dict__ at call time,
-so reassigning rag_pipeline_module.DOCUMENT_PROMPT before calling ask()
-is sufficient; no import-time binding is broken by doing this.
-
-Same caveats as evaluate_llm_vs_rag.py apply and are not repeated by this
-script's design: n=5 questions, and the RAGAS judge is the same underlying
-model (Groq llama-3.1-8b-instant) as the generator, object-isolated but not
-model-independent.
+Same caveats as evaluate_llm_vs_rag.py: n=5 questions, judge is the same
+model family as the generator (object-isolated, not model-independent).
 
 Usage:  python evaluate/ablation_metadata_tagging.py
 """
@@ -61,11 +41,8 @@ from config import settings
 
 from langchain_core.prompts import PromptTemplate
 
-# ── ragas / langchain-community compatibility shim ────────────────────────────
-# Same fix as evaluate_llm_vs_rag.py -- ragas 0.4.x unconditionally imports
-# langchain_community.chat_models.vertexai at module load, which no longer
-# exists in this project's installed langchain-community. We never use
-# VertexAI, so stub it out before importing ragas.
+# Same fix as evaluate_llm_vs_rag.py -- ragas 0.4.x imports a vertexai
+# submodule that no longer exists; stub it out before importing ragas.
 import types as _types
 
 _vertexai_shim = _types.ModuleType("langchain_community.chat_models.vertexai")
@@ -102,10 +79,8 @@ from ragas.metrics import (  # noqa: E402
     context_recall,
 )
 
-# ── Rate-limit retry helper (identical to evaluate_llm_vs_rag.py) ─────────────
-# This script makes the same order of magnitude of Groq calls as
-# evaluate_llm_vs_rag.py (10 generations + judged metrics), so it needs the
-# same backoff behaviour.
+# Rate-limit retry helper, identical to evaluate_llm_vs_rag.py (same order
+# of magnitude of Groq calls).
 MAX_RATE_LIMIT_RETRIES = 6
 SLEEP_BETWEEN_QUESTIONS = 8.0
 
@@ -133,39 +108,19 @@ def call_with_retry(fn, *args, max_retries: int = MAX_RATE_LIMIT_RETRIES, **kwar
             time.sleep(wait)
 
 
-# RAGAS asks the judge to decompose an answer into individual statements and
-# return a verdict on each as JSON. That output is far longer than a normal
-# chat reply, and if the model stops before closing the JSON, RAGAS raises
-# LLMDidNotFinishException and records NaN for that question.
-#
-# That is not a harmless gap. The means are computed over whatever scored, so
-# a failure in one condition and a different failure in the other produces two
-# averages taken over different questions — which is not a paired comparison
-# and can flip the sign of the reported delta. It did exactly that on the
-# 19 August run: faithfulness read +0.058 across the two 4-question means, but
-# −0.006 across the 3 questions both conditions actually scored.
-#
-# 4096 is comfortably above what these prompts need and well inside
-# llama-3.1-8b-instant's completion limit. Setting max_tokens costs nothing on
-# the free tier — it caps a single response, it does not buy quota. If you hit
-# rate limits, lower the questions or add delay; don't lower this.
+# If the judge's JSON output gets cut off, RAGAS records NaN for that
+# question -- and a failure in only one condition breaks pairing, silently
+# flipping the sign of the delta (real example: +0.058 naive vs -0.006
+# paired, on the 19 Aug run). 4096 costs nothing on the free tier (caps a
+# response, doesn't use quota) -- don't lower it to fix rate limits.
 RAGAS_JUDGE_MAX_TOKENS = 4096
 
 
 def _get_judge_llm():
-    """
-    A separate client for the RAGAS judge, not the one the pipeline generates
-    with.
-
-    Two reasons for keeping them apart. The judge needs a much larger
-    max_tokens than generation does, and raising it on the shared client would
-    change how ask() behaves — which would make this ablation's answers
-    incomparable with every other result in the study. And a judge should be
-    configured for consistency rather than for fluency: temperature 0 here
-    against the pipeline's 0.2, so repeated runs vary as little as the API
-    allows. It does not make the judge deterministic; it just stops it adding
-    variance of its own on top of the generator's.
-    """
+    """Separate client from the pipeline's generation llm: needs a much
+    larger max_tokens (raising it on the shared client would change ask()'s
+    behaviour) and temperature 0, not the pipeline's 0.2, for a more
+    consistent judge."""
     from langchain_groq import ChatGroq
 
     return ChatGroq(
@@ -173,8 +128,7 @@ def _get_judge_llm():
         model_name=settings.GROQ_MODEL,
         temperature=0,
         max_tokens=RAGAS_JUDGE_MAX_TOKENS,
-        # Longer than the pipeline's 30s: these prompts are bigger and there
-        # is no user waiting on the other end of an evaluation run.
+        # Longer timeout than the pipeline's 30s - bigger prompts, no user waiting.
         timeout=120,
     )
 
@@ -195,10 +149,8 @@ def _get_ragas_embeddings() -> LangchainEmbeddingsWrapper:
 OUTPUT_DIR = "data/results/ablation_metadata_tagging"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Identical to evaluate_llm_vs_rag.py's QUESTIONS/GROUND_TRUTHS -- not
-# imported from that file, since importing it would re-execute its whole
-# top-level evaluation run. Keep these two lists in sync by hand if either
-# file's questions ever change.
+# Same as evaluate_llm_vs_rag.py's QUESTIONS/GROUND_TRUTHS, not imported
+# (importing would re-run that file's whole top-level eval). Keep in sync by hand.
 QUESTIONS = [
     "Why are customers unhappy with battery life?",
     "What delivery problems are customers reporting?",
@@ -215,13 +167,11 @@ GROUND_TRUTHS = [
     "Across all platforms, the main complaints involve product quality, delivery, refunds and customer service."
 ]
 
-# The "tagged" condition is rag.pipeline's own DOCUMENT_PROMPT, captured
-# before anything is mutated, so it can always be restored exactly.
+# Captured before anything is mutated, so it can always be restored exactly.
 TAGGED_DOCUMENT_PROMPT = rag_pipeline_module.DOCUMENT_PROMPT
 
-# The "untagged" condition: LangChain's own default document_prompt
-# (create_stuff_documents_chain falls back to this when none is supplied).
-# Same page_content, no [Platform: ... | Rating: ... | Sentiment: ...] prefix.
+# LangChain's default document_prompt (create_stuff_documents_chain's
+# fallback) - same page_content, no metadata prefix.
 UNTAGGED_DOCUMENT_PROMPT = PromptTemplate(
     input_variables=["page_content"],
     template="{page_content}",
@@ -229,11 +179,9 @@ UNTAGGED_DOCUMENT_PROMPT = PromptTemplate(
 
 
 def generate_rag_answer(question: str):
-    # ask() never raises -- rate-limit errors inside its own try/except get
-    # caught there and returned as an "An error occurred: ..." answer string
-    # instead of propagating. Detect that here and retry explicitly, since
-    # call_with_retry can't see an exception that never left ask(). Same
-    # pattern as evaluate_llm_vs_rag.py's generate_rag_answer().
+    # ask() never raises -- rate-limit errors come back as an "error
+    # occurred" string, not an exception. Same pattern as
+    # evaluate_llm_vs_rag.py's generate_rag_answer().
     for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
         result = ask(question)
         answer = result["answer"]
@@ -264,12 +212,9 @@ def run_condition(label: str) -> list[dict]:
         answer, sources = generate_rag_answer(question)
         latency = (time.perf_counter() - start) * 1000
 
-        # full_text (untruncated), same reasoning as evaluate_llm_vs_rag.py:
-        # RAGAS should judge against exactly what the LLM saw, not a 200-char
-        # UI preview. Note this comes from _format_sources() and does NOT
-        # depend on DOCUMENT_PROMPT, so contexts are directly comparable
-        # between the tagged and untagged conditions -- retrieval itself
-        # never changes here.
+        # full_text, not the 200-char UI preview -- and independent of
+        # DOCUMENT_PROMPT, so contexts are directly comparable across
+        # conditions (retrieval itself never changes here).
         contexts = [source["full_text"] for source in sources]
 
         results.append({
@@ -301,17 +246,13 @@ def build_ragas_dataset(results: list[dict]) -> Dataset:
     return Dataset.from_dict(data)
 
 
-# =============================================================================
 # Run both conditions
-# =============================================================================
 
 print("=" * 80)
 print("Ablation: metadata tagging in the RAG context")
 print("=" * 80)
 
-# Condition A: tagged (rag.pipeline's real default -- this line is
-# technically redundant since nothing has been changed yet, but it makes the
-# starting state explicit rather than assumed).
+# Condition A: tagged (redundant right now, but makes the starting state explicit).
 rag_pipeline_module.DOCUMENT_PROMPT = TAGGED_DOCUMENT_PROMPT
 tagged_results = run_condition("tagged")
 
@@ -319,16 +260,13 @@ tagged_results = run_condition("tagged")
 rag_pipeline_module.DOCUMENT_PROMPT = UNTAGGED_DOCUMENT_PROMPT
 untagged_results = run_condition("untagged")
 
-# Restore the real pipeline's default immediately after generation, before
-# any RAGAS judging happens below -- nothing downstream should run against
-# the untagged state by accident.
+# Restore the default before any RAGAS judging runs, so nothing downstream
+# accidentally sees the untagged state.
 rag_pipeline_module.DOCUMENT_PROMPT = TAGGED_DOCUMENT_PROMPT
 
 print("\nGeneration complete for both conditions.")
 
-# =============================================================================
 # Save generated answers
-# =============================================================================
 
 tagged_df = pd.DataFrame(tagged_results)
 untagged_df = pd.DataFrame(untagged_results)
@@ -339,10 +277,7 @@ untagged_df.to_csv(os.path.join(OUTPUT_DIR, "untagged_answers.csv"), index=False
 print("✓ tagged_answers.csv saved")
 print("✓ untagged_answers.csv saved")
 
-# =============================================================================
-# RAGAS judge (separate Groq instance from the generation llm used inside
-# ask(), same object-isolation pattern as evaluate_llm_vs_rag.py)
-# =============================================================================
+# RAGAS judge: separate Groq instance, same isolation pattern as evaluate_llm_vs_rag.py
 
 judge_llm = _get_judge_llm()
 ragas_llm = _get_ragas_llm(judge_llm)
@@ -351,9 +286,7 @@ eval_run_config = RunConfig(max_workers=1, max_retries=10, max_wait=60)
 
 METRICS = [faithfulness, answer_relevancy, context_precision, context_recall]
 
-# =============================================================================
 # Evaluate: tagged
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Evaluating condition: tagged")
@@ -372,9 +305,7 @@ print(tagged_scores_df)
 tagged_scores_df.to_csv(os.path.join(OUTPUT_DIR, "tagged_ragas_scores.csv"), index=False)
 print("✓ tagged_ragas_scores.csv saved")
 
-# =============================================================================
 # Evaluate: untagged
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Evaluating condition: untagged")
@@ -393,9 +324,7 @@ print(untagged_scores_df)
 untagged_scores_df.to_csv(os.path.join(OUTPUT_DIR, "untagged_ragas_scores.csv"), index=False)
 print("✓ untagged_ragas_scores.csv saved")
 
-# =============================================================================
 # Comparison summary
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Creating comparison summary")
@@ -403,18 +332,10 @@ print("=" * 80)
 
 metric_cols = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
-# ---------------------------------------------------------------------------
-# Pairing check.
-#
-# pandas .mean() skips NaN silently. If the judge failed on question 4 in the
-# tagged condition and question 1 in the untagged one, both columns still
-# produce a number — but those two numbers are averages over different
-# questions, and subtracting them is not a paired comparison. On the
-# 19 August run that turned a real −0.006 into a reported +0.058.
-#
-# So: fail loudly instead of averaging around the hole. Nothing downstream
-# should ever have to guess whether a delta was computed like for like.
-# ---------------------------------------------------------------------------
+# Pairing check: pandas .mean() skips NaN silently, so a judge failure on
+# different questions per condition still produces two means -- comparing
+# them isn't a paired comparison (real example above: -0.006 became +0.058).
+# Fail loudly here instead of averaging around the hole.
 print()
 unpaired = []
 for col in metric_cols:
@@ -484,9 +405,7 @@ print(comparison)
 comparison.to_csv(os.path.join(OUTPUT_DIR, "comparison_summary.csv"), index=False)
 print("✓ comparison_summary.csv saved")
 
-# =============================================================================
-# Graph -- grouped bar chart, all four RAGAS metrics, tagged vs untagged
-# =============================================================================
+# Graph: grouped bar chart, all four RAGAS metrics, tagged vs untagged
 
 import matplotlib.pyplot as plt
 import numpy as np

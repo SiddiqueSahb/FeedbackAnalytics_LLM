@@ -29,12 +29,9 @@ from config import settings
 
 from langchain_groq import ChatGroq
 
-# ── ragas / langchain-community compatibility shim ────────────────────────────
-# ragas 0.4.x unconditionally imports langchain_community.chat_models.vertexai
-# at module load. That submodule no longer exists in this project's installed
-# langchain-community (post LangChain 1.0 rebrand). We never use VertexAI, so
-# stub the module out before importing ragas. Same fix as scripts/evaluate_rag.py
-# -- see that file's docstring for the full explanation.
+# ragas 0.4.x unconditionally imports langchain_community.chat_models.vertexai,
+# which doesn't exist post LangChain 1.0 rebrand. Stub it out before importing
+# ragas (same fix as scripts/evaluate_rag.py).
 import types as _types
 
 _vertexai_shim = _types.ModuleType("langchain_community.chat_models.vertexai")
@@ -76,10 +73,8 @@ from ragas.metrics import (  # noqa: E402
 
 )
 
-# ── Rate-limit retry helper ────────────────────────────────────────────────────
-# Groq's free tier caps out at a few thousand tokens/minute for
-# llama-3.1-8b-instant -- generating 10 answers plus judging them with RAGAS
-# routinely hits it. Retries with backoff instead of crashing the run.
+# Groq's free tier caps out fast for llama-3.1-8b-instant; retry with
+# backoff instead of crashing the run.
 MAX_RATE_LIMIT_RETRIES = 6
 SLEEP_BETWEEN_QUESTIONS = 8.0
 
@@ -108,12 +103,10 @@ def call_with_retry(fn, *args, max_retries: int = MAX_RATE_LIMIT_RETRIES, **kwar
 
 
 def _get_ragas_llm(llm) -> LangchainLLMWrapper:
-    # bypass_n=True: ragas otherwise mutates llm.n in place to request
-    # multiple completions per call; Groq's API rejects n>1 outright, and
-    # ragas only resets .n on the success path, so a failed call leaves the
-    # shared object permanently broken. Combined with using a *separate*
-    # ChatGroq instance below (never the same object as the generation llm),
-    # this fully isolates the judge from the generator.
+    # bypass_n=True: ragas mutates llm.n to request multiple completions,
+    # which Groq rejects (n>1) and only resets on success -- a failed call
+    # leaves a shared llm permanently broken. Use a separate ChatGroq
+    # instance to keep the judge isolated from the generator.
     return LangchainLLMWrapper(llm, bypass_n=True)
 
 
@@ -186,10 +179,8 @@ def generate_rag_answer(
 
 ):
 
-    # ask() never raises -- rate-limit errors inside its own try/except get
-    # caught there and returned as an "An error occurred: ..." answer string
-    # instead of propagating. Detect that here and retry explicitly, since
-    # call_with_retry can't see an exception that never left ask().
+    # ask() never raises -- rate-limit errors come back as an "error
+    # occurred" string, not an exception, so retry manually here.
     for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
         result = ask(
             question
@@ -212,9 +203,7 @@ def generate_rag_answer(
 
     )
 
-# =============================================================================
 # Evaluate LLM and RAG
-# =============================================================================
 
 print("=" * 80)
 print("Evaluating LLM Only and RAG")
@@ -229,9 +218,7 @@ for question in QUESTIONS:
 
     print(f"\nQuestion: {question}")
 
-    # -----------------------------
-    # LLM Only
-    # -----------------------------
+    # LLM only
     start = time.perf_counter()
 
     llm_answer = generate_llm_answer(llm, question)
@@ -244,19 +231,15 @@ for question in QUESTIONS:
         "Latency (ms)": round(llm_latency, 2)
     })
 
-    # -----------------------------
     # RAG
-    # -----------------------------
     start = time.perf_counter()
 
     rag_answer, sources = generate_rag_answer(question)
 
     rag_latency = (time.perf_counter() - start) * 1000
 
-    # full_text (untruncated) -- not "text", which is a 200-char UI preview.
-    # Using the preview here would make RAGAS judge faithfulness/recall
-    # against less evidence than the LLM actually saw, deflating scores for
-    # reasons that have nothing to do with retrieval quality.
+    # full_text, not "text" (a 200-char UI preview) -- RAGAS needs the same
+    # evidence the LLM actually saw, or scores get deflated for no reason.
     contexts = [source["full_text"] for source in sources]
 
     rag_results.append({
@@ -273,9 +256,7 @@ for question in QUESTIONS:
 
 print("\nEvaluation Complete!")
 
-# =============================================================================
-# Save Generated Answers
-# =============================================================================
+# Save generated answers
 
 llm_df = pd.DataFrame(llm_results)
 rag_df = pd.DataFrame(rag_results)
@@ -293,21 +274,15 @@ rag_df.to_csv(
 print("✓ LLM answers saved")
 print("✓ RAG answers saved")
 
-# =============================================================================
-# Prepare LLM Dataset
-# =============================================================================
+# Prepare LLM dataset
 
 print("\n" + "=" * 80)
 print("Preparing LLM Dataset")
 print("=" * 80)
 
-# Column names below (user_input/response/retrieved_contexts/reference) are
-# what this project's installed ragas version's SingleTurnSample schema
-# actually requires -- the older question/answer/contexts/ground_truth
-# naming is silently accepted by pydantic (unrecognized kwargs get dropped)
-# and produces samples with every field set to None. That's not a crash: it
-# just means every RAGAS score would be computed against empty input with
-# no error printed anywhere. Verified directly against the installed schema.
+# These field names (user_input/response/retrieved_contexts/reference) are
+# what this ragas version's schema needs; older names (question/answer/...)
+# get silently dropped by pydantic -> all-None samples, no error.
 llm_data = {
     "user_input": [],
     "response": [],
@@ -333,9 +308,7 @@ llm_dataset = Dataset.from_dict(llm_data)
 print("✓ LLM dataset created")
 
 
-# =============================================================================
-# Prepare RAG Dataset
-# =============================================================================
+# Prepare RAG dataset
 
 print("\n" + "=" * 80)
 print("Preparing RAG Dataset")
@@ -364,24 +337,16 @@ rag_dataset = Dataset.from_dict(rag_data)
 
 print("✓ RAG dataset created")
 
-# =============================================================================
-# Build the RAGAS judge (separate Groq instance from the generation `llm`,
-# never passed llm= to evaluate() before -- ragas defaults to constructing
-# an OpenAI client in that case, which fails outright with no OPENAI_API_KEY
-# configured. max_workers is lowered from ragas' default of 16 because
-# Groq's free-tier tokens-per-minute limit gets hammered hard by 16
-# concurrent judge calls; ragas' own retry (up to max_retries, max_wait
-# seconds) still applies on top of this.
-# =============================================================================
+# Separate Groq instance for the judge -- without llm=, ragas defaults to
+# OpenAI (fails, no key). max_workers=1 because Groq's free tier can't
+# handle 16 concurrent judge calls; ragas' own retry runs on top of this.
 
 judge_llm = _get_llm()
 ragas_llm = _get_ragas_llm(judge_llm)
 ragas_embeddings = _get_ragas_embeddings()
 eval_run_config = RunConfig(max_workers=1, max_retries=10, max_wait=60)
 
-# =============================================================================
-# Evaluate LLM Only
-# =============================================================================
+# Evaluate LLM only
 
 print("\n" + "=" * 80)
 print("Evaluating LLM Only")
@@ -413,9 +378,7 @@ llm_scores_df.to_csv(
 print("✓ llm_ragas_scores.csv saved")
 
 
-# =============================================================================
 # Evaluate RAG
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Evaluating RAG")
@@ -450,9 +413,7 @@ rag_scores_df.to_csv(
 print("✓ rag_ragas_scores.csv saved")
 
 
-# =============================================================================
-# Create Comparison Summary
-# =============================================================================
+# Comparison summary
 
 print("\n" + "=" * 80)
 print("Creating Comparison Summary")
@@ -534,9 +495,7 @@ comparison.to_csv(
 print("✓ comparison_summary.csv saved")
 
 
-# =============================================================================
-# Overall Results
-# =============================================================================
+# Overall results
 
 overall = pd.DataFrame({
 
@@ -630,15 +589,11 @@ overall.to_csv(
 print("✓ overall_results.csv saved")
 
 
-# =============================================================================
 # Graphs
-# =============================================================================
 
 import matplotlib.pyplot as plt
 
-# --------------------------------------------------------
-# Answer Relevancy
-# --------------------------------------------------------
+# Answer relevancy
 
 plt.figure(figsize=(6,5))
 
@@ -696,9 +651,7 @@ plt.savefig(
 
 plt.close()
 
-# --------------------------------------------------------
 # Faithfulness
-# --------------------------------------------------------
 
 plt.figure(figsize=(6,5))
 
@@ -754,9 +707,7 @@ plt.savefig(
 
 plt.close()
 
-# --------------------------------------------------------
-# Context Precision
-# --------------------------------------------------------
+# Context precision
 
 plt.figure(figsize=(6,5))
 
@@ -812,9 +763,7 @@ plt.savefig(
 
 plt.close()
 
-# --------------------------------------------------------
-# Context Recall
-# --------------------------------------------------------
+# Context recall
 
 plt.figure(figsize=(6,5))
 
@@ -870,9 +819,7 @@ plt.savefig(
 
 plt.close()
 
-# --------------------------------------------------------
-# Latency Comparison
-# --------------------------------------------------------
+# Latency comparison
 
 plt.figure(figsize=(6,5))
 

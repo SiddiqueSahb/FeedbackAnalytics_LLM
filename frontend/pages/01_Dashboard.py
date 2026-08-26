@@ -1,9 +1,7 @@
 """
 Dashboard — corpus-level view of sentiment, ratings, categories and trends.
 
-The previous version restated the same four figures three times in prose
-("Business Snapshot", "Executive Summary", "Key Business Insights") before
-showing a chart. The numbers are in the KPI row; the charts are the content.
+KPI row + charts only — an earlier version repeated the same figures in prose three times.
 """
 
 import os
@@ -36,7 +34,7 @@ page_header(
     rq=["RQ1", "RQ3"],
 )
 
-# ── Load ────────────────────────────────────────────────────────────────────
+# Load
 with st.spinner("Loading dashboard..."):
     stats = api_get("/api/analytics/summary")
     by_platform = api_get("/api/analytics/sentiment-by-platform")
@@ -52,7 +50,7 @@ if not stats:
     )
     st.stop()
 
-# ── Filters ─────────────────────────────────────────────────────────────────
+# Filters
 st.sidebar.header("Filters")
 
 if isinstance(platforms, list) and platforms:
@@ -69,7 +67,7 @@ st.sidebar.caption(
     "corpus-wide."
 )
 
-# ── KPIs ────────────────────────────────────────────────────────────────────
+# KPIs
 kpi = st.columns(5)
 cards = [
     ("Total reviews", f"{stats.get('total_reviews', 0):,}"),
@@ -89,7 +87,7 @@ st.caption(
 
 st.divider()
 
-# ── Charts ──────────────────────────────────────────────────────────────────
+# Charts
 tab_sentiment, tab_ratings, tab_keywords, tab_trends = st.tabs(
     ["Sentiment", "Ratings", "Keywords", "Trends"]
 )
@@ -97,7 +95,7 @@ tab_sentiment, tab_ratings, tab_keywords, tab_trends = st.tabs(
 CHART_LAYOUT = dict(height=420, plot_bgcolor="white",
                     margin=dict(l=10, r=10, t=40, b=10))
 
-# ── Sentiment ───────────────────────────────────────────────────────────────
+# Sentiment
 with tab_sentiment:
     if by_platform:
         df_platform = pd.DataFrame(by_platform)
@@ -141,7 +139,7 @@ with tab_sentiment:
     else:
         st.info("Sentiment breakdown unavailable.")
 
-# ── Ratings ─────────────────────────────────────────────────────────────────
+# Ratings
 with tab_ratings:
     if rating_distribution:
         df_rating = pd.DataFrame(rating_distribution)
@@ -161,7 +159,7 @@ with tab_ratings:
     else:
         st.info("Rating distribution unavailable.")
 
-# ── Keywords ────────────────────────────────────────────────────────────────
+# Keywords
 with tab_keywords:
     if keywords:
         df_keywords = pd.DataFrame(keywords).sort_values("count", ascending=True).tail(20)
@@ -192,7 +190,7 @@ with tab_keywords:
     else:
         st.info("Keyword analysis unavailable.")
 
-# ── Trends ──────────────────────────────────────────────────────────────────
+# Trends
 with tab_trends:
     if trends:
         df_trend = pd.DataFrame(trends)
@@ -220,7 +218,7 @@ with tab_trends:
 
 st.divider()
 
-# ── Where to go next ────────────────────────────────────────────────────────
+# Where to go next
 st.subheader("Go deeper")
 nav = st.columns(3)
 with nav[0]:

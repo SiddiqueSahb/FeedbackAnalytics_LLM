@@ -1,32 +1,15 @@
 """
-Sentiment diagnostics — why the off-the-shelf models lose on this corpus.
-=========================================================================
-The headline comparison in scripts/evaluate_models.py shows fine-tuned
-DistilBERT (0.824 accuracy) and logistic regression (0.803) beating
-pre-trained RoBERTa (0.633) and VADER (0.514). Aggregate accuracy hides
-the reason: both off-the-shelf models almost never predict the neutral
-class (per-class F1 of 0.225 and 0.086 respectively), so they behave like
-binary classifiers on a three-class, rating-derived label scheme.
+Sentiment diagnostics - why the off-the-shelf models (RoBERTa 0.633, VADER
+0.514 accuracy) lose to fine-tuned DistilBERT (0.824) and logistic
+regression (0.803): both barely predict "neutral" (F1 0.225/0.086), so
+they behave like binary classifiers on this three-class task.
 
-This script tests that explanation with three experiments:
-
-  A. Per-platform breakdown
-     RoBERTa here is cardiffnlp/twitter-roberta-base-sentiment-latest,
-     trained on tweets. If the problem is domain mismatch, it should do
-     noticeably better on the Twitter Airline subset than on Amazon or
-     Yelp. This turns a plausible argument into measured evidence.
-
-  B. Binary re-evaluation (neutral removed)
-     If the three-class label scheme is what penalises the off-the-shelf
-     models, removing neutral should close most of the gap.
-
-  C. VADER threshold sensitivity
-     VADER's default neutral band is compound in [-0.05, 0.05], which is
-     very narrow. Widening it shows how much of VADER's failure is a
-     threshold-mapping artefact rather than the lexicon itself.
-
-All three reuse ONE set of cached predictions, so the models are run over
-the sample only once. Re-running the script after that is fast.
+Three experiments test that, sharing one cached prediction run:
+  A. Per-platform breakdown - is RoBERTa's Twitter pretraining showing?
+  B. Binary re-evaluation (neutral removed) - does the 3-class scheme
+     explain the gap?
+  C. VADER threshold sweep - is VADER's narrow default neutral band
+     ([-0.05, 0.05]) the real culprit?
 
 Outputs (data/results/sentiment_diagnostics/):
     predictions.csv                 cached per-review predictions (all models)
@@ -66,11 +49,10 @@ from sklearn.metrics import accuracy_score, f1_score
 
 from config import settings
 
-# ── Settings ────────────────────────────────────────────────────────────────
+# Settings
 RANDOM_SEED = 42
-# Reviews sampled per (platform, sentiment) cell — 3 platforms x 3 classes.
-# 200 gives 1,800 reviews total, enough for stable per-platform F1 while
-# keeping two transformer models on CPU to a sensible runtime.
+# Per (platform, sentiment) cell - 200 -> 1,800 total, enough for stable
+# per-platform F1 without blowing up CPU runtime for the transformer models.
 SAMPLE_PER_CELL = 200
 MIN_TEXT_LENGTH = 6
 
@@ -97,21 +79,14 @@ def pretty(label: str) -> str:
 
 
 def load_sample() -> pd.DataFrame:
-    """
-    Rebuild the same held-out test split used by scripts/evaluate_models.py
-    (20%, stratified, random_state=42), then take a balanced subsample with
-    an equal number of reviews per platform-and-class cell.
-
-    Balancing per cell matters for experiment A: Twitter Airline is only
-    about 2% of the corpus, so a plain random sample would leave too few
-    tweets to say anything reliable about per-platform performance.
-    """
+    """Rebuilds evaluate_models.py's held-out test split (20%, stratified,
+    seed 42), then balances per platform-and-class cell - otherwise Twitter
+    Airline (~2% of the corpus) is too thin for experiment A."""
     data_path = PROJECT_ROOT / settings.DATA_PATH
     logger.info("Loading %s", data_path)
     df = pd.read_parquet(data_path)
 
-    # Same filtering and split as the main evaluation script, so this
-    # sample really is drawn from the same held-out data.
+    # Same filtering/split as the main evaluation script - same held-out data.
     df = df.dropna(subset=["cleaned_text", "sentiment_label"])
     df = df[df["cleaned_text"].str.len() > MIN_TEXT_LENGTH]
     df = df[df["sentiment_label"].isin(CLASSES)]
@@ -139,14 +114,10 @@ def load_sample() -> pd.DataFrame:
 
 
 def load_models() -> dict[str, object]:
-    """
-    Instantiate the five classifiers. Any model that cannot be loaded is
-    skipped with a warning instead of stopping the run.
-
-    FineTunedSentiment silently falls back to RoBERTa when the fine-tuned
-    weights are missing, which would quietly duplicate the RoBERTa column
-    and invalidate the comparison — so its _loaded flag is checked here.
-    """
+    """Instantiates the five classifiers; a failed load is skipped with a
+    warning. FineTunedSentiment silently falls back to RoBERTa when its
+    weights are missing, which would duplicate the RoBERTa column - so
+    _loaded is checked here."""
     from nlp.sentiment import VaderSentiment, RobertaSentiment, FineTunedSentiment
     from nlp.classical_models import NaiveBayesSentiment, LogisticRegressionSentiment
 
@@ -177,15 +148,9 @@ def load_models() -> dict[str, object]:
 
 
 def run_predictions(sample: pd.DataFrame) -> pd.DataFrame:
-    """
-    Predict every sampled review with every available model, once.
-
-    Alongside the predicted label this stores each model's per-class scores
-    (needed for the forced-binary comparison in experiment B) and VADER's
-    signed compound score (needed for the threshold sweep in experiment C).
-    VaderSentiment.predict() reports abs(compound), which loses the sign,
-    so the compound value is taken from the analyser directly.
-    """
+    """Predicts every sampled review with every model, once - also caches
+    per-class scores (for experiment B) and VADER's signed compound score
+    (for experiment C; predict() reports abs(compound), losing the sign)."""
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
     models = load_models()
@@ -209,8 +174,7 @@ def run_predictions(sample: pd.DataFrame) -> pd.DataFrame:
             try:
                 result = model.predict(text)
                 record[f"pred::{name}"] = result.get("label", "error")
-                # Keep the raw class scores so experiment B can force a
-                # binary decision without re-running the models.
+                # Raw scores let experiment B force a binary decision later.
                 record[f"scores::{name}"] = json.dumps(result.get("scores", {}))
             except Exception as exc:
                 logger.debug("%s failed on %s: %s", name, row.review_id, exc)
@@ -232,15 +196,11 @@ def model_names(predictions: pd.DataFrame) -> list[str]:
     return [c.split("::", 1)[1] for c in predictions.columns if c.startswith("pred::")]
 
 
-# ── Experiment A: per-platform breakdown ────────────────────────────────────
+# Experiment A: per-platform breakdown
 def experiment_a_per_platform(predictions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Macro F1 and accuracy for each model on each platform separately.
-
-    The point of interest is RoBERTa: it was pre-trained on Twitter data,
-    so if domain mismatch explains its weak overall score, its Twitter
-    Airline figures should be clearly better than its Amazon figures.
-    """
+    """Macro F1 and accuracy per model per platform. Point of interest:
+    RoBERTa was pretrained on Twitter, so domain mismatch predicts it
+    should score higher there than on Amazon."""
     rows = []
     for name in model_names(predictions):
         for platform in PLATFORMS:
@@ -281,14 +241,11 @@ def experiment_a_per_platform(predictions: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-# ── Experiment B: binary re-evaluation ──────────────────────────────────────
+# Experiment B: binary re-evaluation
 def _forced_binary(scores_json: str, fallback_label: str) -> str:
-    """
-    Decide between negative and positive only, using the model's own class
-    scores and ignoring its neutral score. Falls back to the original label
-    when scores are unavailable (in which case a neutral prediction simply
-    counts as wrong, since the true label here is never neutral).
-    """
+    """Forces a negative/positive choice from the model's own class scores
+    (ignoring neutral); falls back to the original label if scores are
+    missing."""
     try:
         scores = json.loads(scores_json) or {}
     except Exception:
@@ -301,19 +258,11 @@ def _forced_binary(scores_json: str, fallback_label: str) -> str:
 
 
 def experiment_b_binary(predictions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Re-score every model with the neutral class removed.
-
-    Two variants are reported, because there is no single neutral-free
-    reading that is fair to all five models:
-      - Strict: true-neutral reviews dropped; a neutral prediction counts
-        as an error (it cannot be correct).
-      - Forced binary: the same rows, but each model must choose between
-        negative and positive using its own class scores.
-    The strict figure penalises models that use the neutral class well;
-    the forced-binary figure is the one that isolates the effect of the
-    label scheme itself.
-    """
+    """Re-scores every model with neutral removed, two ways: strict (true-
+    neutral rows dropped; a neutral prediction still counts wrong) and
+    forced binary (same rows, model must pick negative/positive). Forced
+    binary isolates the label-scheme effect; strict penalises models that
+    use neutral well."""
     non_neutral = predictions[predictions["true_label"] != "neutral"]
 
     rows = []
@@ -363,16 +312,11 @@ def experiment_b_binary(predictions: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-# ── Experiment C: VADER threshold sweep ─────────────────────────────────────
+# Experiment C: VADER threshold sweep
 def experiment_c_vader_thresholds(predictions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Re-label VADER's cached compound scores using progressively wider
-    neutral bands, from the default +/-0.05 up to +/-0.60.
-
-    If macro F1 improves substantially as the band widens, VADER's poor
-    neutral performance is largely a consequence of an arbitrary decision
-    threshold, not of the lexicon failing to represent neutral text.
-    """
+    """Re-labels VADER's cached compound scores over widening neutral bands
+    (default +/-0.05 up to +/-0.60) - if F1 improves a lot, the threshold
+    is the problem, not the lexicon."""
     bands = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60]
     y_true = predictions["true_label"]
 

@@ -2,9 +2,7 @@
 AI Assistant — conversational exploration of customer complaints using
 retrieval-augmented generation.
 
-Answers are generated only from retrieved reviews, and every answer lists the
-reviews it drew on. That list is the point of the page rather than a detail:
-it is what makes an answer checkable, which is what RQ4 asks about.
+Every answer lists the reviews it drew on — that's what makes it checkable (RQ4).
 """
 
 import os
@@ -46,7 +44,7 @@ SUGGESTIONS = [
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
-# ── Empty state: suggestions that actually submit ───────────────────────────
+# Empty state: suggestions that actually submit
 if not st.session_state.chat_messages:
     st.caption("Start with one of these, or type your own question below.")
     cols = st.columns(len(SUGGESTIONS))
@@ -66,7 +64,7 @@ if not st.session_state.chat_messages:
             "- It rejects questions outside customer feedback before spending a retrieval"
         )
 
-# ── Conversation so far ─────────────────────────────────────────────────────
+# Conversation so far
 for message in st.session_state.chat_messages:
     with st.chat_message(message["role"]):
         if message["role"] == "assistant" and not message.get("grounded", True):
@@ -76,11 +74,10 @@ for message in st.session_state.chat_messages:
         if message["role"] == "assistant":
             render_sources(message.get("sources", []))
 
-# ── New turn ────────────────────────────────────────────────────────────────
+# New turn
 question = st.chat_input("Ask about customer complaints...")
 
-# A suggestion click routes through the same path as a typed question, so
-# there is only one code path to reason about.
+# Suggestion clicks route through the same path as typed questions — one code path only.
 if not question and st.session_state.get("pending_question"):
     question = st.session_state.pop("pending_question")
 
@@ -114,8 +111,7 @@ if question:
             if grounded:
                 st.write(answer)
             else:
-                # A refusal is a designed outcome, not an error — show it as a
-                # distinct state so it can't be mistaken for a failed request.
+                # Refusal is a designed outcome, not an error — show it distinctly.
                 st.warning(answer, icon="⚠️")
                 st.caption(
                     "The pipeline declined rather than answering. Either the question "
@@ -140,7 +136,7 @@ if question:
                 "sources": [], "grounded": True,
             })
 
-# ── Footer controls ─────────────────────────────────────────────────────────
+# Footer controls
 if st.session_state.chat_messages:
     st.divider()
     left, right = st.columns([1, 5])

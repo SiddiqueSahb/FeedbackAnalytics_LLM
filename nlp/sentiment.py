@@ -19,16 +19,8 @@ from config import settings
 
 
 def _thread_safe_cache(build_fn):
-    """
-    Wrap a zero-argument builder in a true once-only lazy singleton.
-
-    functools.lru_cache on its own only protects its internal cache dict
-    from corruption — it does not stop two threads from both starting the
-    wrapped call at the same moment on a cold cache, which would build two
-    copies of the same model in memory. The lock here closes that gap:
-    whichever thread gets there first builds it, the lru_cache underneath
-    means every call after that (from any thread) is a instant cache hit.
-    """
+    """Zero-arg builder as a once-only lazy singleton. lru_cache alone doesn't
+    stop two threads both building on a cold cache; the lock closes that gap."""
     lock = threading.Lock()
     cached = lru_cache(maxsize=1)(build_fn)
 
@@ -38,7 +30,6 @@ def _thread_safe_cache(build_fn):
 
     return get
 
-#  1. VADER (Baseline)
 class VaderSentiment:
     """Rule-based sentiment analyser using VADER compound score."""
 
@@ -70,17 +61,12 @@ class VaderSentiment:
 
         }
 
-    #  2. RoBERTa (Pre-trained Transformer)
 class RobertaSentiment:
-    """
-        cardiffnlp/twitter-roberta-base-sentiment-latest — pre-trained, not fine-tuned.
-        Represents the upper bound for transfer learning without task-specific training.
-    """
+    """cardiffnlp/twitter-roberta-base-sentiment-latest — pre-trained, no fine-tuning."""
     def __init__(self) -> None:
         from transformers import pipeline
         self.pipe = pipeline("text-classification",model=settings.ROBERTA_MODEL,top_k=None,truncation=True, max_length=512)
 
-        # Model returns labels like "positive", "negative", "neutral"
         self.label_map: dict[str,str] = {
             "positive": "positive",
             "negative": "negative",
@@ -106,12 +92,10 @@ class RobertaSentiment:
             "model":"roBERTa"
         }      
 
-    #3. Fine-Tuned DistilBERT (loads from models/distilbert-finetuned)
+    # Loads from settings.MODEL_PATH (default: models/distilbert-finetuned)
 
 class FineTunedSentiment:
-        """
-        Load your finetuned model
-        """
+        """Fine-tuned DistilBERT classifier; falls back to RoBERTa if the model isn't found."""
 
         def __init__(self,model_path: Optional[str] = None) -> None:
             model_path = model_path or settings.MODEL_PATH
@@ -134,34 +118,25 @@ class FineTunedSentiment:
         def predict(self, text: str) -> dict[str, object]:
             """Return the predicted sentiment, confidence, and class probabilities."""
 
-            # Use the fallback model if DistilBERT is unavailable.
             if not self._loaded:
                 result: dict[str, object] = self._fallback.predict(text)
                 result["model"] = "roberta_fallback"
                 return result
 
-            # Tokenise the input text into model-compatible tensors.
             inputs = self.tokenizer(str(text), return_tensors="pt", truncation=True, max_length=128)
 
-            # Disable gradient calculation during inference.
             with torch.no_grad():
 
-                # Generate raw prediction scores from the fine-tuned model.
                 logits = self.model(**inputs).logits
 
-                # Convert raw scores into class probabilities.
                 probs: list[float] = torch.softmax(logits, dim=-1).squeeze().tolist()
 
-                # Select the class with the highest probability.
                 pred_id: int = int(torch.argmax(logits))
 
-                # Map class IDs to sentiment labels.
                 label_names: list[str] = [self.id2label.get(i, str(i)) for i in range(len(probs))]
 
-                # Create a dictionary containing all class probabilities.
                 score_map: dict[str, float] = {lbl.lower(): round(p, 4) for lbl, p in zip(label_names, probs)}
 
-                # Return the final prediction results.
                 return {
                 "label": label_names[pred_id].lower(),
                 "confidence": round(probs[pred_id], 4),
@@ -198,15 +173,9 @@ get_naive_bayes = _thread_safe_cache(_build_naive_bayes)
 
 
 def compare_all(text:str) -> dict[str,dict[str,object]]:
-    """
-    Run all 5 models — generates the  compadrison table.
-    Classical ML → Rule-based → Pre-trained → Fine-tuned.
+    """Run all 5 models (classical -> rule-based -> pretrained -> fine-tuned);
+    returns a dict keyed by model name."""
 
- Returns:
-        Dict keyed by model name, each value is a predict() result dict.
-    """
-
-    #model name and negative,prob
     results:dict[str,dict[str,object]] = {}
 
     try:
@@ -266,19 +235,7 @@ def compare_all(text:str) -> dict[str,dict[str,object]]:
 
 
 def predict_sentiment(text: str) -> dict[str, object]:
-    """
-    Predict sentiment using the fine-tuned DistilBERT model.
-
-    This is the production sentiment model used by the application.
-
-    Returns:
-        {
-            "label": "negative",
-            "confidence": 0.998,
-            "scores": {...},
-            "model": "distilbert_finetuned"
-        }
-    """
+    """Predict sentiment with the fine-tuned DistilBERT model — the production model used by the app."""
     return get_finetuned().predict(text)
 
 

@@ -29,9 +29,7 @@ sys.path.append(
 
 from nlp.tf_idf_embedding import tfidf_search
 
-# =============================================================================
 # Create output directory
-# =============================================================================
 
 OUTPUT_DIR = "data/results/evaluation/tfidf"
 
@@ -42,9 +40,7 @@ os.makedirs(
 
 TOP_K = 10
 
-# =============================================================================
 # Test Queries
-# =============================================================================
 QUERIES = [
 
     # Electronics
@@ -98,9 +94,7 @@ print("="*80)
 print("Semantic Search Evaluation")
 print("="*80)
 
-# =============================================================================
 # Retrieval Performance Evaluation
-# =============================================================================
 
 print("="*80)
 print("Retrieval Performance Evaluation")
@@ -127,7 +121,6 @@ for query in QUERIES:
 
     retrieval_time = round((end - start) * 1000, 2)
 
-    # Calculate similarity statistics
     if results:
         scores = [review["similarity_score"] for review in results]
 
@@ -150,13 +143,11 @@ for query in QUERIES:
     })
 
 
-# Convert results to DataFrame
 retrieval_df = pd.DataFrame(retrieval_results)
 
 print("\nRetrieval Performance")
 print(retrieval_df)
 
-# Save results
 retrieval_df.to_csv(
     os.path.join(OUTPUT_DIR, "retrieval_performance.csv"),
     index=False
@@ -165,9 +156,7 @@ retrieval_df.to_csv(
 print("\n✓ retrieval_performance.csv saved")
 
 
-# =============================================================================
 # Summary Statistics
-# =============================================================================
 
 summary_df = pd.DataFrame({
     "Metric": [
@@ -210,9 +199,7 @@ summary_df.to_csv(
 print("\n summary_statistics.csv saved")
 
 
-# =============================================================================
 # Query Diversity & Retrieval Quality Evaluation
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Query Diversity & Retrieval Quality")
@@ -269,9 +256,7 @@ retrieval_examples_df.to_csv(
 
 print("\n✓ retrieval_examples.csv saved")
 
-# =============================================================================
 # Precision@3 Evaluation
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Precision@3 Evaluation")
@@ -335,9 +320,7 @@ precision_df.to_csv(
 print("\n✓ precision_at_3.csv saved")
 
 
-# =============================================================================
 # Overall Evaluation Summary
-# =============================================================================
 
 print("\n" + "=" * 80)
 print("Overall Evaluation Summary")
@@ -397,9 +380,7 @@ overall_summary.to_csv(output_file, index=False)
 
 print(f"\n✓ Overall summary saved to {output_file}")
 
-# =============================================================================
 # Dataset Information
-# =============================================================================
 
 dataset_information = pd.DataFrame([
     {
@@ -438,9 +419,7 @@ dataset_information.to_csv(
 print("\n✓ dataset_information.csv saved")
 
 
-# =============================================================================
 # Visualisations
-# =============================================================================
 
 plt.figure(figsize=(12, 5))
 

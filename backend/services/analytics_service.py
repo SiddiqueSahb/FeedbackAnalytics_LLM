@@ -31,41 +31,20 @@ log = get_logger("service.analytics")
 _nlp_lock = threading.Lock()
 _df_lock = threading.Lock()
 
-# Precomputed keyword counts written by scripts/precompute_keywords.py.
-# See get_top_keywords() below for why they're precomputed rather than
-# calculated on demand.
+# Precomputed by scripts/precompute_keywords.py — see get_top_keywords().
 KEYWORDS_FILE = os.path.join("data", "results", "keywords", "top_keywords.json")
 
-# Fallback sample size used only when that file is absent. 25,000 reviews
-# takes a minute or two rather than the better part of an hour, and
-# noun-phrase *rankings* are stable well below this size — but the counts
-# are sample counts, so anything returned this way is labelled as such and
-# the dashboard says so on the chart.
+# Fallback size when the precomputed file is absent; rankings are stable
+# well below the full corpus. Results are labelled "sample" either way.
 KEYWORD_SAMPLE_SIZE = 25_000
 KEYWORD_SAMPLE_SEED = 42
 
-# ---------------------------------------------------------------------------
-# Keyword phrase filtering.
+# Keyword filtering: drop pronoun/determiner-headed chunks, strip leading
+# determiners, drop stopwords/short words. Without this, "they", "you",
+# "that" top the "business keywords" list.
 #
-# spaCy's .noun_chunks is correct but not useful on its own: pronouns are noun
-# phrases, so an unfiltered count of a review corpus returns "they", "you",
-# "that", "she" as the most frequent "business keywords". Twelve of the top
-# fifteen were pronouns before this filter existed.
-#
-# Three rules, applied in order:
-#   1. Drop chunks headed by a pronoun or determiner  (they / you / this one)
-#   2. Strip a leading determiner                     ("the food" -> "food")
-#   3. Drop anything left that is a stopword or too short
-#
-# Rule 2 matters more than it looks: without it "the food", "a food" and
-# "food" compete as separate entries and each ranks lower than their combined
-# frequency deserves.
-#
-# Bump KEYWORD_FILTER_VERSION whenever these rules change. The precomputed
-# file records the version it was built with, and _load_precomputed_keywords()
-# refuses a file built by an older one — otherwise a stale file would keep
-# serving unfiltered counts with no sign that anything was wrong.
-# ---------------------------------------------------------------------------
+# Bump KEYWORD_FILTER_VERSION on rule changes — _load_precomputed_keywords()
+# rejects files built with an older version.
 KEYWORD_FILTER_VERSION = 2
 
 MIN_PHRASE_CHARS = 3
@@ -85,14 +64,12 @@ KEYWORD_STOPWORDS = frozenset({
     "everyone", "nobody", "somebody", "anybody", "everybody",
     "myself", "yourself", "himself", "herself", "itself", "ourselves",
     "themselves", "yourselves",
-    # contentless nouns that rank high and say nothing about the complaint.
-    # "time" is deliberately NOT here — "wait time", "delivery time" and
-    # plain "time" are all informative in a feedback corpus.
+    # contentless nouns; "time" deliberately excluded, "wait time" etc. are
+    # informative on their own.
     "thing", "things", "way", "ways", "lot", "lots", "bit", "kind", "sort",
     "part", "parts", "case", "cases", "point", "points",
-    # bare determiners. Rule 1 normally catches these via the POS tag, but a
-    # mis-tagged single-word chunk would otherwise slip through rule 2, whose
-    # regex only strips a determiner when something follows it.
+    # bare determiners; catches mis-tagged single-word chunks rule 2's
+    # regex would miss.
     "the", "a", "an", "this", "that", "these", "those", "my", "your", "our",
     "their", "his", "its", "every", "each",
 })
@@ -100,12 +77,10 @@ KEYWORD_STOPWORDS = frozenset({
 
 def normalise_phrase(chunk) -> str | None:
     """
-    Turn one spaCy noun chunk into a keyword, or None if it should be dropped.
+    Turn one spaCy noun chunk into a keyword, or None to drop it.
 
-    Shared by the live path in get_top_keywords() and by
-    scripts/precompute_keywords.py — deliberately one function, so the two
-    cannot drift apart and start reporting different counts for the same
-    corpus under the same chart.
+    Shared with scripts/precompute_keywords.py so the two paths can't
+    drift apart.
     """
     # 1. pronoun- or determiner-headed chunks carry no topical content
     if chunk.root.pos_ in ("PRON", "DET"):
@@ -130,13 +105,8 @@ def normalise_phrase(chunk) -> str | None:
 @lru_cache(maxsize=1)
 def _get_nlp_uncached():
     """
-    Loaded on first use, not at import time. Loading it at module level used
-    to run the moment this file was imported — i.e. during app startup,
-    before uvicorn had even started accepting connections, delaying
-    readiness for every endpoint, not just the ones that need spaCy.
-
-    ner and lemmatizer are disabled: get_top_keywords() only reads
-    doc.noun_chunks, which needs the tagger + parser, not those two.
+    Lazy-loaded so importing this module doesn't delay app startup.
+    ner/lemmatizer disabled — noun_chunks only needs tagger + parser.
     """
     return spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
 
@@ -159,9 +129,8 @@ def _load_df_uncached() -> pd.DataFrame:
 
 
 def _load_df() -> pd.DataFrame:
-    # Lock closes the gap lru_cache leaves open on its own: without it, two
-    # concurrent first requests could each start reading the 407MB parquet
-    # file at once instead of the second one waiting for the first's result.
+    # Prevents two concurrent first requests both reading the 407MB parquet
+    # at once — lru_cache alone doesn't close that race.
     with _df_lock:
         return _load_df_uncached()
 
@@ -257,10 +226,8 @@ def _load_precomputed_keywords() -> dict | None:
         log.error("Precomputed keyword file has no 'keywords' object: %s", KEYWORDS_FILE)
         return None
 
-    # Refuse a file built by an older version of the phrase filter. Without
-    # this check a stale file keeps serving counts the current rules would
-    # never produce — e.g. pronoun-dominated results from before the filter
-    # existed — and nothing anywhere indicates a mismatch.
+    # Refuse a file built by an older filter version — otherwise it keeps
+    # silently serving stale counts (e.g. pronoun-dominated results).
     file_version = payload.get("filter_version", 1)
     if file_version != KEYWORD_FILTER_VERSION:
         log.warning(
@@ -287,21 +254,10 @@ def get_top_keywords(
     """
     Return the most common business-related phrases.
 
-    Reads precomputed counts where they exist, and only falls back to
-    computing them live — from a sample — where they don't.
-
-    The reason for that split: doing this properly means running spaCy's
-    tagger and dependency parser over every review, because `.noun_chunks`
-    needs the parse. At 642,692 reviews averaging ~41 words that's roughly
-    26 million words, which takes tens of minutes on CPU. It used to happen
-    inside the request, so /api/analytics/keywords could not return within
-    any reasonable HTTP timeout and the dashboard hung waiting for it. The
-    corpus is static, so there was never a reason to pay that cost per
-    request — scripts/precompute_keywords.py pays it once, offline.
-
-    Every returned record carries `basis` ("corpus" or "sample") and
-    `n_reviews`, so a caller can tell exact counts from sampled ones instead
-    of having to assume. The dashboard surfaces this as a caption.
+    Prefers precomputed counts (scripts/precompute_keywords.py) — a live
+    spaCy pass over the full corpus takes tens of minutes, too slow for a
+    request. Falls back to sampling if the precomputed file is missing.
+    Each record carries `basis` ("corpus"/"sample") and `n_reviews`.
     """
 
     precomputed = _load_precomputed_keywords()
@@ -329,8 +285,7 @@ def get_top_keywords(
                 for entry in entries[:n]
             ]
 
-    # ---- fallback: sample, and say so -------------------------------------
-
+    # Fallback: sample, and say so.
     df = _load_df()
 
     if df.empty:
@@ -347,9 +302,7 @@ def get_top_keywords(
     sampled = len(texts) > KEYWORD_SAMPLE_SIZE
 
     if sampled:
-        # Fixed seed so repeated calls and restarts agree with each other —
-        # a chart whose numbers move on refresh is worse than one that's
-        # approximate for a stated reason.
+        # Fixed seed so results are stable across calls/restarts.
         texts = texts.sample(KEYWORD_SAMPLE_SIZE, random_state=KEYWORD_SAMPLE_SEED)
 
     log.info(
@@ -358,14 +311,9 @@ def get_top_keywords(
 
     counter = Counter()
 
-    # nlp.pipe() batches internally instead of paying full per-call
-    # pipeline overhead for each row one at a time — same output,
-    # meaningfully faster.
-    #
-    # normalise_phrase() is the same function scripts/precompute_keywords.py
-    # uses, so the sampled fallback and the precomputed file apply identical
-    # rules. If they didn't, the chart's own caption would be misleading —
-    # the two bases would differ by more than sample size.
+    # nlp.pipe() batches internally — faster than per-row calls.
+    # normalise_phrase() matches precompute_keywords.py so sample and
+    # precomputed results use identical rules.
     for doc in _get_nlp().pipe(texts.tolist(), batch_size=200):
 
         counter.update(
@@ -387,13 +335,10 @@ def get_top_keywords(
 
 def warm_cache() -> None:
     """
-    Load the parquet and the precomputed keywords ahead of the first request.
+    Load the parquet and precomputed keywords ahead of the first request.
 
-    Called from the app's startup hook in backend/main.py. Without it the
-    first dashboard visit pays a 407MB read before anything renders; with it
-    that read overlaps with the server coming up. Deliberately swallows
-    errors — a failed warm-up should make the first request slow, not stop
-    the service from starting.
+    Called from main.py's startup hook. Swallows errors deliberately — a
+    failed warm-up should slow the first request, not block startup.
     """
 
     try:

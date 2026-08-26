@@ -4,12 +4,8 @@ FeedbackIQ backend — FastAPI application entrypoint.
 Run locally:
     uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
-The routers underneath (sentiment, search, rag, analytics) each wrap the
-existing nlp/, rag/ and evaluate/ modules — nothing in those modules was
-changed to build this API. Model files and the FAISS index are loaded lazily
-by the modules that need them, on first request, not at startup, so the
-server still starts even if a heavy model file is missing; only the
-endpoint that needs it will fail.
+Routers wrap the existing nlp/, rag/, evaluate/ modules unchanged. Models
+and the FAISS index load lazily on first request, not at startup.
 """
 
 from __future__ import annotations
@@ -39,17 +35,8 @@ log = get_logger("api.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Warm the analytics cache while the server comes up.
-
-    The 407MB parquet is otherwise read during the first dashboard request,
-    which puts it in front of the user rather than in front of the deploy.
-    Started as a background task rather than awaited, deliberately: uvicorn
-    won't accept connections until the startup hook returns, and blocking
-    there would delay readiness for every endpoint and risk tripping the
-    container health check or a Cloud Run startup probe. This way /api/health
-    answers immediately, the read overlaps with startup, and the first
-    request either finds the data already resident or waits on the same lock
-    the loader has always used.
+    Warm the analytics cache in the background so the 407MB parquet load
+    doesn't block startup or delay the health check.
     """
 
     task = asyncio.create_task(asyncio.to_thread(warm_cache))
@@ -71,21 +58,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# The Streamlit frontend runs as a separate process/container and calls this
-# API over HTTP, so it needs CORS enabled.
+# Streamlit frontend calls this API over HTTP, so CORS is required.
+# ALLOWED_ORIGINS is comma-separated, defaults to "*" for local dev.
 #
-# Origins come from ALLOWED_ORIGINS (comma-separated) and default to "*",
-# which keeps local development and docker-compose working exactly as before.
-# In a deployed environment set it to the frontend's real URL, e.g.
-#   ALLOWED_ORIGINS=https://feedbackiq-frontend-xxxx.a.run.app
-# so the browser won't let arbitrary sites call the API on a user's behalf.
-#
-# allow_credentials is deliberately NOT set — combining it with
-# allow_origins=["*"] is invalid per the CORS spec (browsers reject
-# Access-Control-Allow-Origin: * on credentialed requests). Nothing here
-# uses cookie/credential-based auth today, so there's nothing to gain from
-# it and it would silently break any future browser client that tries to
-# call this API with credentials included.
+# allow_credentials intentionally omitted — invalid together with
+# allow_origins=["*"] per the CORS spec, and nothing here uses cookies.
 allowed_origins = [
     origin.strip()
     for origin in settings.ALLOWED_ORIGINS.split(",")
@@ -131,14 +108,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-# Routers. Each route file already defines its own paths ("/predict",
-# "/analyse", ...); the prefix here is what makes the frontend's
-# "/api/<area>/<path>" URLs match.
+# Prefix here builds the frontend's "/api/<area>/<path>" URLs.
 #
-# The API key dependency is attached here rather than on individual routes,
-# so a new endpoint added to any of these routers is protected by default
-# instead of being protected only if its author remembered to ask for it.
-# "/" and "/api/health" below are deliberately left open — see backend/api/deps.py.
+# API key dependency attached at router level so new endpoints are
+# protected by default. "/" and "/api/health" stay open — see deps.py.
 protected = [Depends(require_api_key)]
 
 app.include_router(sentiment.router, prefix="/api/sentiment", dependencies=protected)
@@ -155,10 +128,7 @@ async def root() -> dict:
 
 @app.get("/api/health", response_model=HealthResponse, tags=["Health"], summary="Health check")
 async def health() -> HealthResponse:
-    """
-    Reports whether the pieces the frontend depends on are actually present,
-    so a 200 from this endpoint means more than "the process is alive".
-    """
+    """Reports whether data/index/LLM are actually available, not just that the process is alive."""
 
     data_loaded = os.path.exists(settings.DATA_PATH)
     index_ready = os.path.exists(settings.INDEX_PATH) or os.path.exists(settings.LANGCHAIN_INDEX_PATH)

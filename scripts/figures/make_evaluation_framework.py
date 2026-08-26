@@ -3,18 +3,12 @@ Draw Figure 3.3 — the evaluation framework across the three pipeline stages.
 
     python scripts/figures/make_evaluation_framework.py
 
-Writes docs/figures/arch_evaluation_framework.{png,pdf}, the paths Chapter 3
-already references, so the chapter needs no edit.
+Writes docs/figures/arch_evaluation_framework.{png,pdf} (paths Chapter 3
+already references).
 
-Layout notes
-------------
-The row labels (Input / Stage / Metrics / Baseline / Output) sit in a gutter on
-the left, aligned with the row each one names. The previous version placed them
-in a horizontal strip along the bottom, where they read as a fourth tier of the
-diagram rather than as labels, and where "Metrics" had been dropped entirely.
-
-Everything is laid out from a small number of constants below rather than by
-hand-placed coordinates, so columns stay aligned if the content changes.
+Row labels sit in a left gutter rather than a bottom strip -- the previous
+layout read as a 4th tier and dropped "Metrics". Layout is driven by the
+constants below, not hand-placed coordinates.
 """
 
 from __future__ import annotations
@@ -29,7 +23,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 OUT_DIR = os.path.join("docs", "figures")
 BASENAME = "arch_evaluation_framework"
 
-# ── geometry ────────────────────────────────────────────────────────────────
+# geometry
 GUTTER = 1.35          # width of the row-label column
 COL_W = 2.85           # box width
 COL_GAP = 0.42
@@ -60,7 +54,7 @@ Y_BOTTOM = ROW_OUTPUT - 0.35
 FULL_X = COL_X[0]
 FULL_W = COL_X[-1] + COL_W - COL_X[0]
 
-# ── palette ─────────────────────────────────────────────────────────────────
+# palette
 GREY_F, GREY_E = "#ECEDEF", "#9AA0A6"
 BLUE_F, BLUE_E = "#DCE9F7", "#2E6DB4"
 WHITE_F, WHITE_E = "#FFFFFF", "#B9BDC2"
@@ -131,7 +125,7 @@ def main() -> int:
     ax.set_ylim(Y_BOTTOM, Y_TOP)
     ax.axis("off")
 
-    # ── titles ──────────────────────────────────────────────────────────────
+    # titles
     mid = FULL_X + FULL_W / 2
     ax.text(mid, Y_TOP - 0.32, "Evaluation Framework",
             ha="center", va="center", fontsize=19, fontweight="bold", color=INK)
@@ -139,13 +133,13 @@ def main() -> int:
             "Metrics matched to what each stage permits, with a baseline at every stage",
             ha="center", va="center", fontsize=10.5, color="#555555")
 
-    # ── row labels in the gutter ────────────────────────────────────────────
+    # row labels in the gutter
     for name, y, h in ROW_LABELS:
         ax.text(GUTTER, y + h / 2, name,
                 ha="right", va="center", fontsize=11.5,
                 fontweight="bold", color="#6B7075")
 
-    # ── input ───────────────────────────────────────────────────────────────
+    # input
     box(ax, FULL_X, ROW_INPUT, FULL_W, H_INPUT, GREY_F, GREY_E)
     ax.text(mid, ROW_INPUT + H_INPUT / 2, "Pipeline Outputs",
             ha="center", va="center", fontsize=13, fontweight="bold", color=INK)

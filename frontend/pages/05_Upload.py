@@ -2,10 +2,8 @@
 Batch Upload — score a batch of reviews from a CSV using a single sentiment
 model.
 
-A sample CSV is offered for download so the page can be tried without the user
-having to assemble a file first. The sample is real data — 18 rows drawn from
-the indexed corpus, balanced two per platform per sentiment class — so it
-exercises the model rather than confirming it on easy cases.
+Sample CSV (18 rows, real data, balanced across platforms/sentiment) is offered
+so the page can be tried without assembling a file first.
 """
 
 import os
@@ -32,22 +30,14 @@ sidebar_status()
 
 MAX_ROWS = 200
 
-# Resolved from this file rather than the working directory, so the downloads
-# work whether the app is launched from the project root or from frontend/.
+# Resolved relative to this file, not cwd, so it works from either launch dir.
 ASSETS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # frontend/
     "assets",
 )
 
-# Two samples, because they test different things.
-#
-#   processed — rows from the unified corpus, carrying their corpus labels, so
-#               you can see how often the model agrees with them.
-#   raw       — rows lifted straight out of data/raw/ before preprocess.py ran:
-#               @mentions, double spaces, embedded newlines, non-ASCII, and no
-#               rating column on the Twitter rows. This is the one to use if
-#               what you want to check is that the pipeline copes with input it
-#               has not been cleaned for.
+# Two samples: "processed" has corpus labels (checks model agreement); "raw" is
+# uncleaned data/raw/ rows (checks the pipeline handles messy input).
 SAMPLE_PROCESSED = os.path.join(ASSETS, "sample_reviews.csv")
 SAMPLE_RAW = os.path.join(ASSETS, "sample_reviews_raw.csv")
 
@@ -59,7 +49,7 @@ page_header(
     rq="RQ1",
 )
 
-# ── Sample files ────────────────────────────────────────────────────────────
+# Sample files
 with st.container(border=True):
     st.markdown("**Don't have a file to hand?**")
     st.caption(
@@ -130,7 +120,7 @@ st.caption(
 
 st.divider()
 
-# ── Model ───────────────────────────────────────────────────────────────────
+# Model
 model_options = api_get("/api/sentiment/models")
 if not isinstance(model_options, list) or not model_options:
     model_options = [{"id": "distilbert", "name": "DistilBERT (fine-tuned)", "tier": ""}]
@@ -157,7 +147,7 @@ with model_col:
     )
     st.session_state["last_model"] = model_id
 
-# ── Scoring ─────────────────────────────────────────────────────────────────
+# Scoring
 if uploaded_file is not None:
 
     try:
@@ -172,8 +162,7 @@ if uploaded_file is not None:
             st.warning("The uploaded file has no rows.")
 
         else:
-            # Default to a column that looks like review text, so the sample
-            # file works without the user having to choose anything.
+            # Default to a column that looks like review text, so no selection needed.
             likely = [c for c in df.columns
                       if c.lower() in ("review_text", "text", "review", "comment", "body")]
             default_col = df.columns.get_loc(likely[0]) if likely else 0
@@ -216,9 +205,7 @@ if uploaded_file is not None:
                             ("Neutral", str(int(counts.get("neutral", 0)))),
                         ])
 
-                        # If the file carried its own labels, say how often the
-                        # model agreed. That is the interesting number, and the
-                        # sample file is built so this always appears.
+                        # Show agreement rate when the file has its own labels.
                         if "sentiment_label" in df.columns and len(df) == len(df_results):
                             truth = df["sentiment_label"].astype(str).str.lower().tolist()
                             pred = df_results["label"].astype(str).str.lower().tolist()

@@ -25,10 +25,8 @@ log = get_logger("nlp.embedding_service")
 _resources_lock = threading.Lock()
 
 
-# Load resources once. lru_cache alone doesn't stop two threads both
-# starting this (slow — model + FAISS index + 407MB parquet) on a cold
-# cache; the lock makes the second caller wait for the first's result
-# instead of loading everything twice.
+# lru_cache alone won't stop two threads both loading this (model + FAISS
+# index + 407MB parquet) on a cold cache; the lock serializes it.
 @lru_cache(maxsize=1)
 def _load_resources_uncached():
 
@@ -65,7 +63,6 @@ def _load_resources():
         return _load_resources_uncached()
 
 
-# Semantic Search
 def semantic_search(
     query: str,
     top_k: int = 10,
@@ -74,28 +71,9 @@ def semantic_search(
     min_rating: float = 1.0,
 ) -> list[dict]:
     """
-    Perform semantic search over customer reviews.
-
-    Args
-    ----
-    query:
-        Natural language search query.
-
-    top_k:
-        Number of reviews to return.
-
-    platform_filter:
-        amazon | yelp | twitter_airline
-
-    sentiment_filter:
-        positive | neutral | negative
-
-    min_rating:
-        Minimum rating.
-
-    Returns
-    -------
-    List[dict]
+    Semantic search over customer reviews, optionally filtered by platform
+    (amazon | yelp | twitter_airline), sentiment (positive | neutral |
+    negative), and minimum rating.
     """
 
     if not query.strip():
@@ -107,7 +85,6 @@ def semantic_search(
         model.encode([query], normalize_embeddings=True).astype(np.float32)
     )
 
-    # Search FAISS
     fetch_k = min(top_k * 5, index.ntotal)
 
     scores, indices = index.search(query_embedding, fetch_k)
@@ -121,15 +98,12 @@ def semantic_search(
 
         row = df.iloc[idx]
 
-        # Platform filter
         if platform_filter and row["platform"] != platform_filter:
             continue
 
-        # Sentiment filter
         if sentiment_filter and row["sentiment_label"] != sentiment_filter:
             continue
 
-        # Rating filter
         if row["rating"] < min_rating:
             continue
 
@@ -155,12 +129,8 @@ def semantic_search(
     return results
 
 
-# Embed single text
 def embed_text(text: str) -> np.ndarray:
-    """
-    Convert a single text into a normalized embedding.
-    Used by FastAPI analyse endpoint.
-    """
+    """Normalized embedding for a single text; used by the FastAPI analyse endpoint."""
 
     model, _, _ = _load_resources()
 

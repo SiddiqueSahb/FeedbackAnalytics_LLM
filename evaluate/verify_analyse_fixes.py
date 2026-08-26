@@ -1,21 +1,8 @@
 """
-Live verification for the Analyse-page LLM fixes (docs/Analyse_LLM_Audit.md
-Issues 1, 3, 4, 5).
+Verifies the Analyse-page LLM fixes (docs/Analyse_LLM_Audit.md, issues 1, 3, 4, 5).
+No FAISS index needed - similar_reviews is passed in directly.
 
-Run locally (needs the real venv and GROQ_API_KEY in .env — no FAISS index
-required, since similar_reviews is passed in directly):
-
-    python evaluate/verify_analyse_fixes.py
-
-Checks:
-  1. Weak-match filtering: a similar_reviews list with scores below
-     ANALYSE_SIMILARITY_THRESHOLD should be dropped before reaching the LLM.
-  2. Empty-context marker: with no similar_reviews at all, the business
-     insight should not reference "similar" cases.
-  3. Schema validation: the returned dict always has exactly the 7 expected
-     keys, keywords has exactly 5 items, and severity/priority/department are
-     within the closed sets the app defines (or the whole thing gracefully
-     degrades to EMPTY_ANALYSIS, never a crash or a malformed shape).
+Run: python evaluate/verify_analyse_fixes.py
 """
 import sys
 import os
@@ -62,7 +49,7 @@ def run() -> int:
 
     print(f"ANALYSE_SIMILARITY_THRESHOLD = {ANALYSE_SIMILARITY_THRESHOLD}\n")
 
-    # --- Case 1: only weak matches supplied -> should be treated as empty ---
+    # Case 1: weak matches only -> should be treated as empty
     weak_reviews = [
         {"platform": "amazon", "rating": 3, "sentiment_label": "neutral",
          "similarity_score": 0.10, "text": "Completely unrelated review about a toaster."},
@@ -85,7 +72,7 @@ def run() -> int:
         print("  [PASS] shape OK (weak matches should not appear as grounding)")
     print()
 
-    # --- Case 2: no similar reviews at all ---
+    # Case 2: no similar reviews
     result2 = analyse_review_with_llm(
         text="The battery stopped charging after one week and support never replied.",
         sentiment="negative",
@@ -102,7 +89,7 @@ def run() -> int:
         print("  [PASS] shape OK")
     print()
 
-    # --- Case 3: strong matches supplied -> should be used as grounding ---
+    # Case 3: strong matches -> should be used as grounding
     strong_reviews = [
         {"platform": "amazon", "rating": 1, "sentiment_label": "negative",
          "similarity_score": 0.71, "text": "My phone battery died after 5 days and nobody from support responded."},

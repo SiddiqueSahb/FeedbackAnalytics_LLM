@@ -1,13 +1,4 @@
-"""
-Evaluation service for the FeedbackIQ dissertation results.
-
-Reads the static result files already produced by the offline evaluation
-scripts (scripts/evaluate_models.py, scripts/evaluate_tf_idf.py,
-scripts/evaluate_semantic_search.py, evaluate/evaluate_llm_vs_rag.py) and
-reshapes them into JSON the frontend Evaluation page can render. This
-service does not run any evaluation itself — it only reads files that
-already exist on disk under data/results/.
-"""
+"""Reads pre-computed evaluation results from data/results/ and shapes them for the frontend."""
 
 from __future__ import annotations
 
@@ -33,9 +24,7 @@ _PROJECT_ROOT = os.path.dirname(
 )
 RESULTS_DIR = os.path.join(_PROJECT_ROOT, "data", "results")
 
-# Model result files were written with these display names baked into the
-# filename (see scripts/evaluate_models.py) — mapping keeps the frontend
-# from having to guess how a model name was slugified into a filename.
+# display names as used in the result filenames from evaluate_models.py
 SENTIMENT_MODELS = [
     "Naive Bayes",
     "Logistic Regression",
@@ -46,8 +35,7 @@ SENTIMENT_MODELS = [
 
 
 def _slug(model_name: str) -> str:
-    """'DistilBERT (fine-tuned)' -> 'distilbert_(fine-tuned)' — matches the
-    filenames evaluate_models.py already wrote to data/results/."""
+    """Matches the filenames evaluate_models.py already wrote, e.g. 'DistilBERT (fine-tuned)' -> 'distilbert_(fine-tuned)'."""
     return model_name.lower().replace(" ", "_")
 
 
@@ -65,12 +53,7 @@ def _read_csv(path: str) -> list[dict]:
 
 
 def get_sentiment_evaluation() -> dict:
-    """
-    Model comparison table, per-model confusion matrices, and pairwise
-    significance tests for the five sentiment classifiers compared in the
-    dissertation (VADER, Naive Bayes, Logistic Regression, RoBERTa,
-    fine-tuned DistilBERT).
-    """
+    """Model comparison table, confusion matrices, and significance tests for the five sentiment classifiers."""
 
     comparison = _read_json(os.path.join(RESULTS_DIR, "model_comparison.json")) or {}
 
@@ -114,15 +97,7 @@ def get_retrieval_evaluation() -> dict:
 
 
 def get_rag_evaluation() -> dict:
-    """
-    RAGAS results (faithfulness, answer relevancy, context precision,
-    context recall) comparing the RAG pipeline against a standalone LLM
-    baseline, from evaluate/evaluate_llm_vs_rag.py.
-
-    Returns {"available": False} rather than raising — this evaluation
-    makes live Groq API calls and isn't run automatically, so it's expected
-    to be missing until the user runs it once locally.
-    """
+    """RAGAS results comparing the RAG pipeline vs a standalone LLM. Returns {"available": False} if not run yet — this hits live Groq API calls so it's not run automatically."""
 
     rag_dir = os.path.join(RESULTS_DIR, "llm_vs_rag")
     overall_path = os.path.join(rag_dir, "overall_results.csv")
@@ -135,11 +110,7 @@ def get_rag_evaluation() -> dict:
 
     comparison = _read_csv(os.path.join(rag_dir, "comparison_summary.csv"))
 
-    # Per-question RAGAS scores. "retrieved_contexts" is a stringified
-    # Python list (pandas round-trips it that way through CSV) holding the
-    # full review text used as evidence for each answer — parsed here just
-    # to get a count, since the raw contexts are large and the UI shows a
-    # count plus the answer, not the underlying review text.
+    # retrieved_contexts comes back as a stringified list from CSV; we just need the count
     rag_scores = _read_csv(os.path.join(rag_dir, "rag_ragas_scores.csv"))
     rag_per_question = []
     for row in rag_scores:

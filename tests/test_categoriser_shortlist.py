@@ -1,15 +1,8 @@
 """
-Logic test for the reworked nlp/categoriser.py two-stage
-(embedding shortlist -> NLI rerank) classifier.
-
-Deliberately feeds it a DELIBERATELY CONTAMINATED mixed taxonomy (the exact
-situation the old code produced: amazon + airline + yelp categories all in
-one pool) to prove the NEW embedding-retrieval shortlist stage screens out
-irrelevant categories BEFORE they ever reach the NLI model -- i.e. the fix
-is structural, not just "the taxonomy file happens to be clean now".
-
-sentence-transformers / transformers are stubbed with deterministic synthetic
-encoders so this runs with no heavy downloads.
+Regression test: categoriser's two-stage (embedding shortlist -> NLI rerank)
+classifier must filter irrelevant categories out at the shortlist stage, before
+NLI sees them -- checked with a deliberately mixed amazon/airline/yelp taxonomy.
+Embedder and classifier are stubbed so this runs without downloading models.
 """
 import sys, os, types
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,7 +12,7 @@ os.chdir(PROJECT_ROOT)
 import numpy as np
 import nlp.categoriser as c
 
-# ---- deliberately contaminated mixed taxonomy (amazon + airline + yelp) ----
+# contaminated taxonomy: amazon + airline + yelp mixed together
 c.COMPLAINT_CATEGORIES = [
     {"category": "Battery & Charging Issues",
      "description": "The product fails to charge or hold a charge.",

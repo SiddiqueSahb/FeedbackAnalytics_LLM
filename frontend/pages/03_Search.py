@@ -40,10 +40,8 @@ EXAMPLES = [
     "flight delayed with no explanation",
 ]
 
-# ── Query ───────────────────────────────────────────────────────────────────
-# Filters live beside the query rather than in the sidebar: they change the
-# result set, so hiding them made it possible to search with a filter still
-# applied from a previous query without noticing.
+# Query
+# Filters sit beside the query, not the sidebar — easy to leave one on by accident there.
 query = st.text_input(
     "Search query",
     value=st.session_state.get("search_query", ""),
@@ -72,7 +70,7 @@ if active:
 
 st.divider()
 
-# ── Empty state ─────────────────────────────────────────────────────────────
+# Empty state
 if not search_clicked and not query.strip():
     st.caption("Try one of these:")
     cols = st.columns(len(EXAMPLES))
@@ -82,7 +80,7 @@ if not search_clicked and not query.strip():
                 st.session_state["search_query"] = example
                 st.rerun()
 
-# ── Results ─────────────────────────────────────────────────────────────────
+# Results
 if search_clicked:
 
     if len(query.strip()) < 2:

@@ -17,7 +17,6 @@ from logger import get_logger
 
 log = get_logger("nlp.summariser")
 
-# Load LLM once
 if not settings.GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is not configured.")
 
@@ -39,7 +38,6 @@ EMPTY_ANALYSIS = {
     "executive_summary": "",
 }
 
-# Prompt Template
 prompt = ChatPromptTemplate.from_template(
 """
 You are a Senior Customer Experience Analyst.
@@ -164,10 +162,6 @@ Return ONLY JSON.
 # LCEL chain
 chain = prompt | llm | parser
 
-
-# ----------------------------------------------------------------------
-# Main Function
-# ----------------------------------------------------------------------
 
 def analyse_review_with_llm(
     text: str,

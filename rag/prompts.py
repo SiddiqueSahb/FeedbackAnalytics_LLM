@@ -1,11 +1,6 @@
 """
-Prompt templates used by the Retrieval-Augmented Generation (RAG) pipeline.
-
-These prompts guide the language model to answer business analyst questions
-using only the customer reviews retrieved from the FAISS vector database.
-
-The prompts also support multi-turn conversations and prevent responses to
-questions outside the customer complaint analysis use case.
+Prompt templates for the RAG pipeline: answer business analyst questions
+using retrieved customer reviews, with multi-turn and out-of-scope handling.
 """
 from typing import Optional, Any
 
@@ -16,13 +11,8 @@ except ImportError:
     from langchain.prompts import PromptTemplate  # type: ignore[no-redef]
 
 
-# Prompt that instructs the LLM how to analyse the retrieved customer reviews
-# and generate an evidence-based response.
-#
-# NOTE: each entry in {context} is tagged with its real metadata
-# (see DOCUMENT_PROMPT in pipeline.py) — [Platform: ... | Rating: ... | Sentiment: ...]
-# followed by the review text. That tagging is what makes rules 2 and 5 below
-# actually enforceable instead of asking the model to guess.
+# Each {context} entry is tagged with metadata (see DOCUMENT_PROMPT in
+# pipeline.py) — that tagging is what makes rules 2 and 5 enforceable.
 RAG_PROMPT_TEMPLATE = """You are FeedbackIQ, an analyst assistant that helps business analysts understand customer complaint patterns from real customer reviews.
 
 SCOPE
@@ -53,18 +43,15 @@ Key complaint patterns:
 Recommendation: [one specific, measurable action tied directly to the patterns above]"""
 
 
-# input_variables use "input" (not "question") to match what
-# create_stuff_documents_chain / create_retrieval_chain pass through —
-# LangChain's LCEL retrieval-chain helpers hardcode "input" as the query
-# key, unlike the deprecated ConversationalRetrievalChain this replaced.
+# "input" (not "question") — LangChain's LCEL retrieval-chain helpers
+# hardcode this key name.
 RAG_PROMPT = PromptTemplate(
     template=RAG_PROMPT_TEMPLATE,
     input_variables=["context", "input"],
 )
 
 
-# Prompt used to rewrite follow-up questions into standalone questions
-# before retrieving relevant customer reviews.
+# Rewrites a follow-up question into a standalone one before retrieval.
 CONDENSE_QUESTION_TEMPLATE = """Given the conversation history and a follow-up question, rewrite the follow-up as a single standalone question about customer complaints, so it can be used on its own to search a review database.
 
 Rules:
@@ -79,24 +66,15 @@ Follow-up Question: {input}
 
 Standalone question:"""
 
-# input_variables use "input" (not "question") — required by
-# create_history_aware_retriever, which raises ValueError if "input" isn't
-# present in the prompt's variables. See RAG_PROMPT's comment above for why.
+# create_history_aware_retriever requires the "input" key present.
 CONDENSE_QUESTION_PROMPT = PromptTemplate(
     template=CONDENSE_QUESTION_TEMPLATE,
     input_variables=["chat_history", "input"],
 )
 
 
-# ── Out-of-scope guard ────────────────────────────────────────────────────────
-# Two layers are provided:
-#   1. is_complaint_question()      - free, instant, regex keyword filter.
-#      Use as the default first-pass gate before touching the retriever/LLM.
-#   2. is_complaint_question_llm()  - one small LLM call, more precise on
-#      ambiguous questions (e.g. "what do people think about delivery speed").
-#      Swap it in inside rag/pipeline.py's ask() if the keyword filter proves
-#      too imprecise during evaluation (a defensible thing to report in the
-#      dissertation's error analysis).
+# Out-of-scope guard: is_complaint_question() is the default fast regex
+# filter; is_complaint_question_llm() is a slower, more precise fallback.
 import re
 
 OUT_OF_SCOPE_TOPICS = [
@@ -104,9 +82,8 @@ OUT_OF_SCOPE_TOPICS = [
     "write code", "poem", "story", "joke",
 ]
 
-# Word-boundary regex — plain substring matching (the previous approach)
-# false-positives on things like "history" (contains "story") or "sporty",
-# which would wrongly reject legitimate complaint questions.
+# word-boundary regex — plain substring match false-positives on
+# "history"/"sporty" etc.
 _OUT_OF_SCOPE_PATTERN = re.compile(
     r"\b(?:" + "|".join(re.escape(t) for t in OUT_OF_SCOPE_TOPICS) + r")\b",
     re.IGNORECASE,
@@ -114,22 +91,12 @@ _OUT_OF_SCOPE_PATTERN = re.compile(
 
 
 def is_complaint_question(question: str) -> bool:
-    """
-    Fast heuristic check for whether a question is in-scope.
-
-    Returns:
-        True  - question does not match a known off-topic keyword.
-        False - question clearly matches an off-topic keyword (whole-word match).
-
-    This is a blunt, zero-cost first-pass filter, not a semantic classifier —
-    it will not catch every off-topic question (e.g. "recommend me a good book"),
-    only the ones the current topic list explicitly names. See
-    is_complaint_question_llm() for a more precise alternative.
-    """
+    """Fast regex check for whether a question is in-scope; not a semantic
+    classifier, so it misses off-topic questions not in OUT_OF_SCOPE_TOPICS."""
     return not bool(_OUT_OF_SCOPE_PATTERN.search(question))
 
 
-# ── Optional: LLM-based scope classifier ──────────────────────────────────────
+# Optional: LLM-based scope classifier (slower, more accurate than the regex)
 SCOPE_CLASSIFIER_TEMPLATE = """Decide if the question below is asking about customer complaints, feedback, reviews, sentiment, or ratings on Amazon, Yelp, or Twitter Airline.
 
 Question: {question}
@@ -143,21 +110,10 @@ SCOPE_CLASSIFIER_PROMPT = PromptTemplate(
 
 
 def is_complaint_question_llm(question: str, llm: Optional[Any] = None) -> bool:
-    """
-    LLM-based out-of-scope guard. More accurate than the keyword heuristic on
-    ambiguous questions, at the cost of one extra small LLM call.
-
-    Falls back to is_complaint_question() if no LLM is configured or the call
-    fails, so this can never crash the pipeline or leave a question unclassified.
-
-    Not wired into ask() by default — swap it in there if you want the
-    stricter guard:
-        from rag.prompts import is_complaint_question_llm as is_complaint_question
-    """
-    from rag.pipeline import _get_llm, _invoke_with_retry  # local import: avoids
-                                        # a circular import with pipeline.py,
-                                        # which imports from this module at
-                                        # load time.
+    """LLM-based out-of-scope guard; falls back to is_complaint_question()
+    if no LLM is configured or the call fails. Not wired into ask() by default."""
+    # local import: pipeline.py imports this module at load time
+    from rag.pipeline import _get_llm, _invoke_with_retry
 
     llm = llm or _get_llm()
     if llm is None:
@@ -165,8 +121,7 @@ def is_complaint_question_llm(question: str, llm: Optional[Any] = None) -> bool:
 
     try:
         prompt_text = SCOPE_CLASSIFIER_PROMPT.format(question=question)
-        # _invoke_with_retry absorbs a brief Groq rate limit here instead of
-        # immediately falling back to the coarser keyword-only guard below.
+        # retries through brief Groq rate limits before falling back
         response = _invoke_with_retry(llm.invoke, prompt_text)
         text = getattr(response, "content", str(response)).strip().upper()
         return text.startswith("YES")

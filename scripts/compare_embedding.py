@@ -6,9 +6,7 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# =============================================================================
 # Paths
-# =============================================================================
 
 SEMANTIC_FILE = "data/results/evaluation_semantic_search/overall_summary.csv"
 TFIDF_FILE = "data/results/evaluation/tfidf/overall_summary.csv"
@@ -16,17 +14,13 @@ TFIDF_FILE = "data/results/evaluation/tfidf/overall_summary.csv"
 OUTPUT_DIR = "data/results/comparison_embedding_models"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# =============================================================================
 # Load summaries
-# =============================================================================
 
 semantic_summary = pd.read_csv(SEMANTIC_FILE)
 tfidf_summary = pd.read_csv(TFIDF_FILE)
 
 
-# =============================================================================
 # Create comparison table
-# =============================================================================
 
 comparison = semantic_summary.rename(
     columns={"Value": "Semantic Search"}
@@ -47,17 +41,9 @@ comparison.to_csv(
 
 print("\n✓ retrieval_comparison.csv saved")
 
-# =============================================================================
-# Plot comparison
-# =============================================================================
 
-# =============================================================================
-# Comparison Graphs
-# =============================================================================
 
-# -------------------------------------------------------------
 # Average Retrieval Time
-# -------------------------------------------------------------
 
 retrieval_time = comparison.loc[
     comparison["Metric"] == "Average Retrieval Time (ms)"
@@ -98,9 +84,7 @@ plt.savefig(
 plt.close()
 
 
-# -------------------------------------------------------------
 # Average Similarity Score
-# -------------------------------------------------------------
 
 similarity = comparison.loc[
     comparison["Metric"] == "Average Similarity Score"
@@ -141,9 +125,7 @@ plt.savefig(
 plt.close()
 
 
-# -------------------------------------------------------------
 # Average Precision@3
-# -------------------------------------------------------------
 
 precision = comparison.loc[
     comparison["Metric"] == "Average Precision@3"

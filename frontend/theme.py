@@ -1,15 +1,9 @@
 """
 Shared styling for the FeedbackIQ frontend.
 
-Why raw CSS rather than Streamlit layout primitives: `st.columns` on the
-pinned Streamlit version does not reflow on narrow screens — a five-column KPI
-row stays five columns on a phone and each cell becomes unreadable. The grids
-below use `repeat(auto-fit, minmax(...))`, so the same markup renders as five
-across on a desktop, two or three on a tablet and one on a phone without any
-breakpoint bookkeeping.
-
-Streamlit widgets (buttons, page links, inputs) stay as Streamlit widgets —
-only the presentational cards are hand-built.
+Raw CSS instead of st.columns: the pinned Streamlit version doesn't reflow on
+narrow screens, so KPI rows use CSS grid (auto-fit/minmax) instead. Streamlit
+widgets stay as widgets — only the presentational cards are hand-built.
 """
 
 import streamlit as st

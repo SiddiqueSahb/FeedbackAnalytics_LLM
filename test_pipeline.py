@@ -1,8 +1,6 @@
 import os
 
-# ------------------------------------------------------------------
 # Prevent thread conflicts (important on macOS)
-# ------------------------------------------------------------------
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -13,8 +11,6 @@ import torch
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
-
-# ------------------------------------------------------------------
 
 import sys
 import time
@@ -42,9 +38,7 @@ Customer support ignored my emails and refused to replace the product.
 
 print_stage("STARTING COMPLETE NLP PIPELINE")
 
-# ------------------------------------------------------------------
 # Step 1 - Sentiment
-# ------------------------------------------------------------------
 print_stage("STEP 1 - SENTIMENT")
 
 start = time.time()
@@ -56,9 +50,7 @@ print(sentiment)
 
 print(f"Time: {time.time()-start:.2f}s")
 
-# ------------------------------------------------------------------
 # Step 2 - Complaint Category
-# ------------------------------------------------------------------
 print_stage("STEP 2 - COMPLAINT CATEGORY")
 
 start = time.time()
@@ -70,9 +62,7 @@ print(category)
 
 print(f"Time: {time.time()-start:.2f}s")
 
-# ------------------------------------------------------------------
 # Step 3 - Semantic Search (RAG)
-# ------------------------------------------------------------------
 print_stage("STEP 3 - RAG RETRIEVAL")
 
 start = time.time()
@@ -92,9 +82,7 @@ for i, r in enumerate(similar, start=1):
 
 print(f"\nTime: {time.time()-start:.2f}s")
 
-# ------------------------------------------------------------------
 # Step 4 - LLM
-# ------------------------------------------------------------------
 print_stage("STEP 4 - LLM ANALYSIS")
 
 start = time.time()
@@ -110,9 +98,7 @@ print("✓ LLM Completed")
 
 print(f"Time: {time.time()-start:.2f}s")
 
-# ------------------------------------------------------------------
 # Final Output
-# ------------------------------------------------------------------
 print_stage("FINAL OUTPUT")
 
 print("\nSentiment")

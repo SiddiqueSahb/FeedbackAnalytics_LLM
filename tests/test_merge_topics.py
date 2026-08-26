@@ -1,20 +1,15 @@
 """
-Lightweight logic test for the NEW merge_topics()/taxonomy_coherence() functions
-in scripts/discover_categories.py, run against a synthetic scenario that
-reproduces the exact bug reported (battery/charging vs fee/charge lexical
-collision, plus cross-platform topics that should NOT merge).
-
-Heavy deps (bertopic, sentence-transformers, umap, hdbscan, spacy, langdetect,
-groq) are stubbed out via sys.modules so the real production module can be
-imported and its actual merge/coherence functions exercised directly --
-no full BERTopic run needed to validate this logic.
+Regression test for merge_topics()/taxonomy_coherence(): reproduces the battery/charging
+vs fee/charge lexical-collision bug, plus topics that must not merge across platforms.
+Heavy deps are stubbed via sys.modules so the real module's merge logic runs without a
+full BERTopic pipeline.
 """
 import sys, os, types
 PROJECT_ROOT = "" + os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + ""
 sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
-# ---- stub heavy modules ----
+# stub heavy deps
 bertopic_mod = types.ModuleType("bertopic")
 bertopic_repr = types.ModuleType("bertopic.representation")
 class KeyBERTInspired:
@@ -71,12 +66,9 @@ def unit(v):
     v = np.array(v, dtype=float)
     return v / np.linalg.norm(v)
 
-# 6 raw topics across 3 platforms, in a 4-dim toy embedding space.
-# A and B are the SAME underlying complaint (battery/charging) discovered as
-# two separate BERTopic topics -- they should merge.
-# D shares the literal substring "charge" with A/B but is semantically a fee
-# complaint (orthogonal direction) -- it must NOT merge with the battery
-# cluster, proving the fix is based on embedding distance, not lexical overlap.
+# A/B: same battery complaint as two separate topics -- should merge.
+# D: shares the word "charge" with A/B but is a different (fee) complaint --
+# must NOT merge; proves merge uses embedding distance, not lexical overlap.
 raw_topics = [
     {"topic_id": 0, "platform": "amazon", "label": "Battery Charging Power",
      "keywords": ["battery", "charging", "power", "drain"], "count": 500,
@@ -121,7 +113,7 @@ for i, cl in enumerate(merged, 1):
 coh = dc.taxonomy_coherence(merged)
 print(f"Taxonomy coherence (mean pairwise centroid cosine sim): {coh:.4f}\n")
 
-# ---- assertions ----
+# assertions
 battery_cluster = None
 for cl in merged:
     ids = {t["topic_id"] for t in cl["source_topic_ids"]}

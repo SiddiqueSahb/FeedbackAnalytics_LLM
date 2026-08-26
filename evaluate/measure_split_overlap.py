@@ -1,23 +1,11 @@
 """
-Measure the exact overlap between the shared sentiment test set and the
-fine-tuned DistilBERT model's training partition.
+Measures exact overlap between the shared sentiment test set and DistilBERT's
+fine-tuning partition, to quantify test-set contamination (Ch3 3.5.3).
 
-Both splits are deterministic (seed 42) and both derive from the same
-processed parquet file, so the contamination can be measured exactly rather
-than estimated. This reproduces:
+Both splits are deterministic (seed 42) from the same parquet, so the
+overlap is computed exactly via pandas index intersection, not estimated.
 
-  1. The shared 80/20 test set, exactly as scripts/evaluate_models.py builds
-     it (including its cleaned_text length filter).
-  2. The 70/15/15 partitions, exactly as notebooks/3.DistillBERTFineTuning.ipynb
-     builds them (two nested splits: 0.15 held out, then 0.176 of the
-     remainder).
-
-It then intersects the pandas indices, which are preserved from the parquet
-through both split procedures, and reports what proportion of the shared test
-set the fine-tuned model saw during training.
-
-Usage:
-    python evaluate/measure_split_overlap.py
+Usage: python evaluate/measure_split_overlap.py
 """
 
 from __future__ import annotations
@@ -36,11 +24,8 @@ LABEL_MAP = {"negative": 0, "neutral": 1, "positive": 2}
 
 
 def build_shared_test_set(df: pd.DataFrame) -> pd.Index:
-    """The 80/20 test set used for the five-model comparison.
-
-    Mirrors scripts/evaluate_models.py lines 64-73 exactly, including the
-    length filter, which the fine-tuning notebook does not apply.
-    """
+    """80/20 test set, mirrors scripts/evaluate_models.py L64-73 (incl. the
+    length filter, which the fine-tuning notebook skips)."""
     d = df.dropna(subset=["cleaned_text", "sentiment_label"])
     d = d[d["cleaned_text"].str.len() > 5]
     d = d.assign(label_id=d["sentiment_label"].map(LABEL_MAP))
@@ -54,11 +39,9 @@ def build_shared_test_set(df: pd.DataFrame) -> pd.Index:
 
 
 def build_finetune_partitions(df: pd.DataFrame) -> tuple[pd.Index, pd.Index, pd.Index]:
-    """The 70/15/15 partitions used to fine-tune DistilBERT.
-
-    Mirrors notebooks/3.DistillBERTFineTuning.ipynb cells 8-15: no length
-    filter, and a nested split (0.15 out, then 0.176 of the remaining 85%).
-    """
+    """70/15/15 DistilBERT fine-tune split, mirrors
+    notebooks/3.DistillBERTFineTuning.ipynb cells 8-15 (no length filter;
+    nested split: 0.15 out, then 0.176 of the rest)."""
     d = df[["cleaned_text", "sentiment_label", "platform"]].dropna(
         subset=["cleaned_text", "sentiment_label"]
     )

@@ -4,9 +4,8 @@ FeedbackIQ — landing page.
 Run:
     streamlit run frontend/app.py
 
-Organised around the four research questions rather than a feature list: each
-one states what was asked, what the numbers showed, and links to the page where
-that behaviour can be seen running.
+Organised around the four research questions, not a feature list — each links
+to where that finding can be seen running.
 """
 
 import os
@@ -29,7 +28,7 @@ st.set_page_config(
 theme.inject()
 sidebar_status()
 
-# ── Hero ────────────────────────────────────────────────────────────────────
+# Hero
 theme.hero(
     "FeedbackIQ",
     "Which method should you actually use to analyse customer feedback — a lexicon, "
@@ -40,9 +39,7 @@ theme.hero(
     "Amazon products, Yelp businesses and Twitter Airline complaints",
 )
 
-# ── Corpus at a glance ──────────────────────────────────────────────────────
-# Read live where the backend can supply it, so the page never states a figure
-# the running system would contradict.
+# Corpus at a glance — live figures so the page never contradicts the running system
 stats = api_get("/api/analytics/summary") or {}
 
 total = stats.get("total_reviews")
@@ -62,7 +59,7 @@ if not stats:
         "Backend unreachable — showing corpus constants. Start the API to load live figures."
     )
 
-# ── Research questions ──────────────────────────────────────────────────────
+# Research questions
 theme.section(
     "Research Questions",
     "What the study asked, what the numbers showed, and where you can watch the "
@@ -149,7 +146,7 @@ for rq in RESEARCH_QUESTIONS:
         with col:
             st.page_link(path, label=label, icon=icon, use_container_width=True)
 
-# ── How it works ────────────────────────────────────────────────────────────
+# How it works
 theme.section(
     "How It Works",
     "Three stages, because monitoring, diagnosis and investigation are different jobs "
@@ -187,7 +184,7 @@ st.caption(
     "study measures each stage on its own terms rather than collapsing them into one number."
 )
 
-# ── Explore ─────────────────────────────────────────────────────────────────
+# Explore
 theme.section("Explore")
 
 PAGES = [
@@ -203,7 +200,7 @@ for col, (label, path, icon) in zip(list(row1) + list(row2), PAGES):
     with col:
         st.page_link(path, label=label, icon=icon, use_container_width=True)
 
-# ── Detail, folded away ─────────────────────────────────────────────────────
+# Detail, folded away
 with st.expander("Technology and method detail"):
     left, right = st.columns(2)
 

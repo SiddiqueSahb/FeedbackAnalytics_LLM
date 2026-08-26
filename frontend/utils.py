@@ -1,10 +1,8 @@
 """
 Shared helpers for calling the FastAPI backend from Streamlit pages.
 
-Every page needs the same three things: the backend base URL, a GET
-helper and a POST helper with sensible error handling. Keeping them here
-means each page just calls api_get()/api_post() instead of repeating the
-same requests.get(...)/try/except boilerplate five times.
+Base URL + GET/POST helpers with error handling, so pages don't repeat the
+same requests.get(...)/try/except boilerplate.
 """
 
 import os
@@ -22,29 +20,21 @@ from config import settings
 
 API = os.getenv("API_URL", settings.API_URL)
 
-# Every /api/* route except /api/health now requires this header (see
-# backend/api/deps.py). Read from the environment first so the deployed
-# frontend can be given the real key without it living in source.
+# Every /api/* route except /api/health requires this header (see
+# backend/api/deps.py). Read from env so the key isn't hardcoded here.
 API_KEY = os.getenv("API_KEY", settings.API_KEY)
 HEADERS = {"x-api-key": API_KEY}
 
-# The backend loads its FAISS index and models on the first request that
-# needs them, not at startup — deliberately, so the server comes up even
-# when a model file is missing. The cost is that the first call after a
-# cold start reads well over a gigabyte from disk and can take the better
-# part of a minute. The old 15s GET timeout was comfortable locally, where
-# the index was usually already warm, and failed on a freshly started
-# container against an otherwise healthy backend. 90s covers the cold path;
-# a genuinely stuck backend still surfaces, just later.
+# First request after a cold start can take ~a minute (FAISS index + models
+# load lazily, not at startup). 90s covers that; the old 15s timeout failed
+# against a freshly started but healthy backend.
 GET_TIMEOUT = int(os.getenv("API_GET_TIMEOUT", "90"))
 
-# Health is a small existence check with no model loading behind it, so it
-# should answer fast or be treated as down. Kept short on purpose — the
-# sidebar status widget calls it on every page render.
+# No model loading behind health, so it should be fast — kept short since
+# the sidebar calls it on every page render.
 HEALTH_TIMEOUT = int(os.getenv("API_HEALTH_TIMEOUT", "10"))
 
-# Used everywhere a sentiment class is shown — charts, badges, tables —
-# so "positive" is always the same green on every page.
+# Used everywhere sentiment is shown, so colors stay consistent across pages.
 SENTIMENT_COLORS = {
     "positive": "#2ECC71",
     "negative": "#E74C3C",
@@ -58,8 +48,8 @@ def api_get(
     params: dict | None = None,
     timeout: int | None = None,
 ) -> dict | list:
-    """GET from the backend. Cached for a minute since dashboard data doesn't
-    change second to second. Returns {} on any failure."""
+    """GET from the backend. Cached a minute — dashboard data doesn't change
+    second to second. Returns {} on failure."""
 
     try:
         response = requests.get(
@@ -101,10 +91,8 @@ def api_get(
 
 
 def api_post(endpoint: str, payload: dict, timeout: int = 60) -> dict | list | None:
-    """POST to the backend. Not cached — these are user-triggered actions
-    (analyse a review, run a search, ask a question), not passive reads.
-    Returns None on failure so callers can tell "no result" apart from
-    "empty result"."""
+    """POST to the backend. Not cached — these are user-triggered actions, not
+    passive reads. Returns None on failure, distinct from an empty result."""
 
     try:
         response = requests.post(
@@ -146,10 +134,7 @@ def api_post(endpoint: str, payload: dict, timeout: int = 60) -> dict | list | N
     return None
 
 
-# Which research question each page demonstrates. Kept here rather than in the
-# pages so the mapping is stated once and every page shows it the same way —
-# the landing page is organised around these four questions, and a page that
-# didn't name its own would break that thread.
+# Which research question each page demonstrates — centralised so it's stated once.
 RESEARCH_QUESTIONS = {
     "RQ1": "How does sentiment classification performance differ between lexicon, "
            "classical, pretrained transformer and fine-tuned transformer approaches?",
@@ -163,18 +148,12 @@ RESEARCH_QUESTIONS = {
 
 
 def page_header(title: str, subtitle: str, rq: str | list[str] | None = None) -> None:
-    """
-    One header treatment for every page: title, one-line explanation, and the
-    research question the page speaks to.
-
-    Written as a helper rather than repeated per page because five pages
-    drifting into five slightly different header styles is exactly how an app
-    stops looking deliberate.
-    """
-    # Styled header rather than st.title, so pages match the landing page and
-    # scale down cleanly on a narrow screen (see frontend/theme.py). The
-    # subtitle is written as markdown by callers, so convert the inline
-    # emphasis by hand — raw HTML blocks don't get markdown processing.
+    """One header treatment for every page: title, one-line explanation, and
+    the research question it speaks to. Centralised so pages don't drift into
+    different header styles."""
+    # Styled header, not st.title, to match the landing page (see theme.py).
+    # Subtitle is markdown from callers — convert emphasis by hand since raw
+    # HTML blocks skip markdown processing.
     subtitle = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", subtitle)
     subtitle = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<i>\1</i>", subtitle)
     subtitle = re.sub(r"`(.+?)`", r"<code>\1</code>", subtitle)
@@ -198,13 +177,9 @@ def page_header(title: str, subtitle: str, rq: str | list[str] | None = None) ->
 
 
 def render_sources(sources: list[dict], label: str | None = None) -> None:
-    """
-    Show the reviews an answer was built from.
-
-    This is the visible half of RQ4: an answer that cannot be traced back to
-    identifiable evidence is not verifiable, whatever its faithfulness score
-    says. Defined once because the chatbot renders it in two places (replayed
-    history and the live turn) and the two had drifted apart.
+    """Show the reviews an answer was built from — the visible half of RQ4
+    (traceability). Shared here since it's rendered in two places (history +
+    live turn).
     """
     if not sources:
         return
@@ -230,13 +205,9 @@ def render_sources(sources: list[dict], label: str | None = None) -> None:
 
 
 def sidebar_status() -> None:
-    """
-    Small "is the backend actually working" widget, shown in the sidebar on
-    every page. Calls /api/health rather than assuming — a green dot here
-    only means the process is running; this checks the data, index and LLM
-    key are all present too, since any of those missing is the real cause
-    behind "why isn't this page showing anything".
-    """
+    """Sidebar "is the backend working" widget. Checks /api/health, which
+    also verifies data/index/LLM key are present — not just that the process
+    is up."""
 
     with st.sidebar:
 
@@ -256,9 +227,8 @@ def sidebar_status() -> None:
             "LLM (Groq)": health.get("llm_ready", False),
         }
 
-        # A real status use of colour (genuine system state), not a
-        # decorative box — reserving st.success/st.error for cases like
-        # this is what makes them still mean something when they appear.
+        # Genuine status colour, not decorative — keeps st.success/st.error
+        # meaningful when they do appear.
         if all(checks.values()):
             st.success("All systems ready", icon="✅")
         else:

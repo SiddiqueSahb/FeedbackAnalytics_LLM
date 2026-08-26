@@ -1,26 +1,11 @@
 """
-Zero-shot complaint categorisation — embedding retrieval + NLI rerank.
+Zero-shot complaint categorisation: embedding retrieval narrows to a
+shortlist, then NLI reranks it (see categorise()).
 
-Pipeline:
-  Step 1 → discover_categories.py : BERTopic discovers per-platform topics,
-           merges near-duplicates across platforms via centroid clustering,
-           and an LLM names each merged cluster (name + description +
-           exemplar phrases) — saved as ONE consolidated taxonomy file:
-             data/processed/complaint_categories_all_<sentiment>.json
-  Step 2 → categoriser.py (this) :
-           a) embed the incoming review and every category's description,
-           b) cosine-rank categories, take a small shortlist (default top 6),
-           c) run zero-shot NLI (DeBERTa-v3-zeroshot by default) ONLY on that
-              shortlist, using each category's DESCRIPTION as the hypothesis
-              (much richer signal than a bare 3-word label),
-           d) below a confidence threshold, return "Unclassified / Emerging
-              Complaint" instead of forcing a wrong label.
-
-This intentionally does NOT concatenate multiple per-platform category files.
-That was the root cause of cross-platform leakage (e.g. an airline category
-like "Fees & Charge Problems" being offered as a candidate for an Amazon
-electronics review) — see docs/methodology_review.md for the full writeup.
-Only the single consolidated file is loaded.
+Categories come from discover_categories.py's single consolidated taxonomy
+(data/processed/complaint_categories_all_<sentiment>.json). Concatenating
+per-platform files instead caused cross-platform leakage (e.g. an airline
+category showing up for an Amazon review) — see docs/methodology_review.md.
 """
 
 from __future__ import annotations
@@ -99,10 +84,7 @@ COMPLAINT_CATEGORIES: list[dict] = _load_categories()
 
 
 def _hypothesis_text(cat: dict) -> str:
-    """Text used as the EMBEDDING target for a category during the retrieval/
-    shortlist stage — description + exemplars carries more signal than the
-    bare category name, and concatenation quality doesn't matter for cosine
-    similarity the way it does for an NLI hypothesis sentence."""
+    """Embedding target for shortlist retrieval — desc+exemplars beats the bare label."""
     text = cat["description"]
     if cat["exemplars"]:
         text = f"{text} For example: {'; '.join(cat['exemplars'][:3])}."
@@ -110,14 +92,8 @@ def _hypothesis_text(cat: dict) -> str:
 
 
 def _nli_hypothesis(cat: dict) -> str:
-    """Text used as the actual NLI hypothesis sentence. Must be a single,
-    grammatically well-formed sentence — NLI models are trained on clean
-    premise/hypothesis sentence pairs, and a malformed compound (e.g. a
-    template wrapper concatenated with a multi-clause description plus an
-    exemplar list) produces unreliable, noisy entailment scores rather than
-    a real semantic judgement. The description alone (already a complete
-    sentence from the taxonomy-naming step) is used as-is, with NO wrapping
-    template — passing hypothesis_template="{}" to the classifier."""
+    """NLI hypothesis sentence — the description as-is, no template wrapper
+    (NLI needs a clean single sentence, not a malformed compound)."""
     return cat["description"]
 
 
@@ -128,15 +104,13 @@ def _get_embedder_uncached():
 
 
 def _get_embedder():
-    # Lock closes the gap lru_cache leaves open: two threads both missing
-    # the cache at once would otherwise both load this model concurrently.
+    # Closes the race where two threads both miss lru_cache and load twice
     with _embedder_lock:
         return _get_embedder_uncached()
 
 
 def _category_embeddings(categories: tuple) -> np.ndarray:
-    """Embeds each category's hypothesis text. `categories` must be hashable
-    (tuple of tuples) so this can be memoised alongside COMPLAINT_CATEGORIES."""
+    """Embeds each category's hypothesis text; needs hashable input to memoise."""
     embedder = _get_embedder()
     texts = [c[1] for c in categories]  # (name, hypothesis_text) pairs
     return embedder.encode(texts, normalize_embeddings=True)
@@ -153,9 +127,7 @@ def _get_classifier_uncached(model_name: str):
 
 
 def _get_classifier(model_name: str):
-    # Single lock rather than per-model-name — in practice this is only
-    # ever called with one or two distinct model names, so the small extra
-    # serialization cost isn't worth the complexity of a lock-per-key.
+    # One lock, not per-model — only ever 1-2 distinct models in practice
     with _classifier_lock:
         return _get_classifier_uncached(model_name)
 
@@ -174,15 +146,9 @@ def categorise(
     model_name: str | None = None,
 ) -> list[dict[str, object]]:
     """
-    Two-stage categorisation:
-      1. Embedding retrieval — cosine-rank all categories against the review,
-         take the top `shortlist_k` (default settings.CATEGORY_SHORTLIST_K).
-         This bounds the number of candidate labels the NLI model ever sees,
-         regardless of how large the taxonomy grows, instead of an arbitrary
-         hard cap on the whole taxonomy.
-      2. Zero-shot NLI rerank on the shortlist only, using each category's
-         description as the hypothesis. Below the confidence threshold,
-         the top result is replaced with "Unclassified / Emerging Complaint".
+    Embedding retrieval narrows to a shortlist (bounds what NLI sees
+    regardless of taxonomy size), then NLI reranks it. Below the confidence
+    threshold, top result becomes "Unclassified / Emerging Complaint".
 
     Returns up to `top_k` {"category", "score", "description"} dicts.
     """

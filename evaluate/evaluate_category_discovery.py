@@ -1,28 +1,16 @@
 """
-Evaluation script for the complaint category-discovery pipeline.
-====================================================================
-USE CASE: quantify how good the automatically-discovered complaint
-taxonomy actually is, for the dissertation's evaluation chapter.
+Evaluates the complaint category-discovery pipeline (BERTopic + zero-shot
+labelling) for the dissertation's evaluation chapter. Unsupervised task,
+no ground truth - reports descriptive/cluster-quality evidence (category
+sizes, platform/sentiment spread, embedding coherence) instead of
+accuracy/precision/recall.
 
-This is an UNSUPERVISED task (BERTopic discovery + zero-shot labelling,
-no human-labelled ground truth), so this script deliberately does NOT
-compute classification metrics such as accuracy, precision, recall or
-F1-score. Instead it reports descriptive / cluster-quality evidence:
-category sizes, platform and sentiment spread, and embedding coherence.
+Doesn't repeat BERTopic discovery (slow, not deterministic) - loads the
+taxonomy scripts/discover_categories.py already produced and classifies a
+fresh review sample through nlp/categoriser.py, so results test the
+taxonomy, not training data.
 
-Design note — what "calling discover_categories.py" means here:
-    scripts/discover_categories.py already ran BERTopic + LLM naming and
-    saved the final taxonomy to:
-        data/processed/complaint_categories_all_negative.json
-    Re-running that BERTopic step here would take a long time and is not
-    fully deterministic (UMAP/HDBSCAN). So this script does not repeat the
-    discovery step — instead it loads the taxonomy that step already
-    produced, and applies nlp/categoriser.py (the second stage of the same
-    pipeline, which reads that exact file) to a fresh sample of reviews.
-    That sample never touched category discovery, so predicting its labels
-    is a genuine test of the taxonomy, not a re-check of training data.
-
-Sections produced (all written to results/category_discovery/):
+Sections (all written to results/category_discovery/):
     1. Category frequency               category_frequency.csv/.png
     2. Platform-wise category spread    platform_category_distribution.csv/.png
     3. Sentiment spread per category    sentiment_by_category.csv/.png
@@ -33,11 +21,6 @@ Sections produced (all written to results/category_discovery/):
     8. Discovery pipeline stats         discovery_platform_topics.csv,
                                          discovery_pipeline_summary.csv,
                                          discovery_topic_reduction.png
-       (reads discover_categories.py's own output files directly —
-       taxonomy_merge_info_negative.json + bertopic_info_<platform>_negative.json —
-       rather than the classified review sample, so it reports on the
-       discovery step itself: how many raw BERTopic topics each platform
-       produced and how much the cross-platform merge collapsed them.)
 """
 
 from __future__ import annotations
@@ -49,9 +32,8 @@ import random
 import logging
 from pathlib import Path
 
-# Must be set before torch is imported anywhere below (sentence-transformers
-# and transformers both pull in torch). Same fix used in rag/pipeline.py for
-# the torch/faiss OpenMP segfault — harmless here, kept for consistency.
+# Must be set before torch is imported (sentence-transformers/transformers
+# pull it in). Same OpenMP segfault fix as rag/pipeline.py.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -67,7 +49,7 @@ import matplotlib.pyplot as plt
 from config import settings
 from nlp.categoriser import categorise, COMPLAINT_CATEGORIES
 
-# ── Settings the user can tweak without reading the rest of the file ────────
+# Settings you can tweak without reading the rest of the file
 RANDOM_SEED = 42                 # keeps sampling + results reproducible
 REVIEWS_PER_PLATFORM = 150       # sample size per platform (450 total by default)
 MANUAL_VALIDATION_SIZE = 100     # size of the manual-checking scaffold (Section 6)
@@ -98,11 +80,8 @@ def pretty(label: str) -> str:
 
 
 def load_review_sample() -> pd.DataFrame:
-    """
-    Load reviews_unified.parquet and draw a fixed-seed sample, split evenly
-    across platforms so every platform gets a fair say in Sections 2 and 3
-    (a plain random sample would be ~70% Yelp and barely touch Twitter).
-    """
+    """Fixed-seed sample, split evenly across platforms (a plain random
+    sample would be ~70% Yelp, barely touch Twitter)."""
     data_path = PROJECT_ROOT / settings.DATA_PATH
     logger.info("Loading reviews from %s", data_path)
     df = pd.read_parquet(data_path)
@@ -119,14 +98,8 @@ def load_review_sample() -> pd.DataFrame:
 
 
 def classify_reviews(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Run every sampled review through nlp.categoriser.categorise() and
-    attach the predicted category + confidence score.
-
-    categorise() only ever handles one review at a time and can raise on a
-    bad input — each review is classified inside its own try/except so one
-    failure just skips that row instead of losing the whole run.
-    """
+    """Runs each review through categorise(); wrapped in its own try/except
+    so one bad input skips that row instead of killing the whole run."""
     records = []
     total = len(df)
     for i, row in enumerate(df.itertuples(index=False), start=1):
@@ -154,7 +127,7 @@ def classify_reviews(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-# ── Section 1: Category Frequency ────────────────────────────────────────────
+# Section 1: Category Frequency
 def section1_category_frequency(df: pd.DataFrame) -> pd.DataFrame:
     """Count how many reviews landed in each category; save CSV + bar chart."""
     freq = (
@@ -178,7 +151,7 @@ def section1_category_frequency(df: pd.DataFrame) -> pd.DataFrame:
     return freq
 
 
-# ── Section 2: Platform-wise Category Distribution ──────────────────────────
+# Section 2: Platform-wise Category Distribution
 def section2_platform_distribution(df: pd.DataFrame) -> None:
     """Cross-tab category x platform; save CSV + stacked bar chart."""
     table = pd.crosstab(df["category"], df["platform"])
@@ -201,7 +174,7 @@ def section2_platform_distribution(df: pd.DataFrame) -> None:
     logger.info("Section 2 done")
 
 
-# ── Section 3: Sentiment Distribution by Category ───────────────────────────
+# Section 3: Sentiment Distribution by Category
 def section3_sentiment_distribution(df: pd.DataFrame) -> None:
     """Cross-tab category x sentiment; save CSV + stacked bar chart."""
     table = pd.crosstab(df["category"], df["sentiment_label"])
@@ -228,19 +201,14 @@ def section3_sentiment_distribution(df: pd.DataFrame) -> None:
     logger.info("Section 3 done")
 
 
-# ── Section 4: Category Coherence ────────────────────────────────────────────
+# Section 4: Category Coherence
 def section4_category_coherence(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    For each category: embed its reviews, take the centroid (mean vector),
-    and measure how close every review sits to that centroid (cosine
-    similarity). A tight, coherent category should score close to 1.0; a
-    scattered "catch-all" category (e.g. Unclassified) should score low.
+    """Embeds each category's reviews, takes the centroid, and scores cosine
+    similarity of each review to it (near 1.0 = tight cluster, low = scattered
+    catch-all like Unclassified).
 
-    Returns:
-        df_with_scores  - same rows as `df` plus a "coherence_to_centroid" column
-                           (needed by Section 5 to pick representative reviews).
-        coherence_table - one row per category with avg/min/max/std.
-    """
+    Returns: (df + "coherence_to_centroid" column for Section 5, per-category
+    avg/min/max/std table)."""
     from sentence_transformers import SentenceTransformer
 
     logger.info("Embedding %d reviews for coherence scoring", len(df))
@@ -291,7 +259,7 @@ def section4_category_coherence(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
     return df, coherence_table
 
 
-# ── Section 5: Representative Reviews ────────────────────────────────────────
+# Section 5: Representative Reviews
 def section5_representative_reviews(df_with_coherence: pd.DataFrame) -> None:
     """Per category, save the N reviews closest to that category's centroid."""
     top = (
@@ -310,13 +278,10 @@ def section5_representative_reviews(df_with_coherence: pd.DataFrame) -> None:
     logger.info("Section 5 done: %d representative reviews saved", len(out))
 
 
-# ── Section 6: Manual Validation Dataset ─────────────────────────────────────
+# Section 6: Manual Validation Dataset
 def section6_manual_validation(df: pd.DataFrame) -> None:
-    """
-    Random sample for a human to manually check the classifier against.
-    Human Category / Correct columns are left blank on purpose — this file
-    is meant to be opened and filled in by hand, not by this script.
-    """
+    """Random sample for manual checking; Human Category / Correct columns
+    are left blank on purpose - filled in by hand, not by this script."""
     n = min(MANUAL_VALIDATION_SIZE, len(df))
     sample = df.sample(n=n, random_state=RANDOM_SEED)
     out = pd.DataFrame({
@@ -331,7 +296,7 @@ def section6_manual_validation(df: pd.DataFrame) -> None:
     logger.info("Section 6 done: %d reviews sampled for manual validation", n)
 
 
-# ── Section 7: Evaluation Summary ────────────────────────────────────────────
+# Section 7: Evaluation Summary
 def section7_evaluation_summary(freq_table: pd.DataFrame, coherence_table: pd.DataFrame) -> None:
     """One-row roll-up of the whole evaluation, for a quick dissertation table."""
     largest = freq_table.iloc[0]
@@ -349,19 +314,14 @@ def section7_evaluation_summary(freq_table: pd.DataFrame, coherence_table: pd.Da
     logger.info("Section 7 done")
 
 
-# ── Section 8: Discovery Pipeline Stats ──────────────────────────────────────
+# Section 8: Discovery Pipeline Stats
 def section8_discovery_pipeline_stats() -> None:
-    """
-    Report on the discovery step itself, straight from the files
-    discover_categories.py already wrote — no BERTopic re-run, no review
-    sampling. This answers "how much raw topic noise did the merge step
-    collapse down, and how coherent is the final taxonomy?", which the
-    review-level sections above can't tell you on their own.
+    """Reports on the discovery step itself from discover_categories.py's
+    output files - no BERTopic re-run needed.
 
-    Reads (must already exist — run scripts/discover_categories.py first
-    if any of these are missing):
+    Requires (run scripts/discover_categories.py first if missing):
         data/processed/taxonomy_merge_info_<sentiment>.json
-        data/processed/bertopic_info_<platform>_<sentiment>.json  (per platform)
+        data/processed/bertopic_info_<platform>_<sentiment>.json
     """
     merge_path = PROCESSED_DIR / f"taxonomy_merge_info_{DISCOVERY_SENTIMENT}.json"
     if not merge_path.exists():
@@ -403,8 +363,7 @@ def section8_discovery_pipeline_stats() -> None:
     }])
     summary.to_csv(OUTPUT_DIR / "discovery_pipeline_summary.csv", index=False)
 
-    # Bar chart: raw topics per platform, plus the final merged category
-    # count as a reference bar — shows how much the merge step collapsed.
+    # Raw topics per platform + final merged count as a reference bar.
     chart_labels = list(platform_table["Platform"]) + ["Merged Taxonomy"]
     chart_values = list(platform_table["Raw Topics Discovered"]) + [merge_info.get("n_categories", 0)]
     chart_colors = [OKABE_ITO[0]] * len(platform_table) + [OKABE_ITO[3]]
@@ -431,9 +390,8 @@ def main() -> None:
     logger.info("Output folder: %s", OUTPUT_DIR)
 
     if len(COMPLAINT_CATEGORIES) <= 7:
-        # 7 is the size of categoriser's static fallback list — a strong hint
-        # the real taxonomy file wasn't found and discover_categories.py
-        # hasn't been run yet.
+        # 7 = categoriser's static fallback list; likely means the real
+        # taxonomy wasn't found and discover_categories.py hasn't run yet.
         logger.warning(
             "Only %d categories loaded — this looks like the static fallback list. "
             "Run scripts/discover_categories.py first for real results.",

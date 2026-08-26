@@ -19,18 +19,14 @@ from sentence_transformers import SentenceTransformer
 
 from config import settings
 
-# Load FAISS index
 index = faiss.read_index(settings.INDEX_PATH)
 print("FAISS index loaded")
 
-# Load processed dataset
 df = pd.read_parquet(settings.DATA_PATH)
 print(f"Loaded {len(df)} reviews")
 
-# Load embedding model
 model = SentenceTransformer(settings.EMBEDDING_MODEL)
 
-# Encode the user query
 query = model.encode(
     ["What are customers complaining about?"],
     normalize_embeddings=True,
@@ -38,7 +34,6 @@ query = model.encode(
 
 print("Searching...")
 
-# Retrieve Top-5 nearest reviews
 scores, indices = index.search(query, k=5)
 
 print("\nTop 5 Results\n")

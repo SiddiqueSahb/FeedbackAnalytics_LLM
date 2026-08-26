@@ -1,59 +1,22 @@
 """
-Full end-to-end check on the RAG pipeline: real FAISS index, real Groq calls.
+End-to-end RAG check: real FAISS index, real Groq calls. Diagnostic tool,
+not part of the dissertation results - writes only to data/results/rag_check/.
 
-Read this first
----------------
-This is a learning/diagnostic tool. It is NOT part of the dissertation results.
-It writes only to data/results/rag_check/ and touches nothing that
-evaluate_llm_vs_rag.py produced.
+Phases: 1) retrieval-only scoring (free), 2) full ask() pipeline (Groq),
+3) RAGAS scoring of answered questions (Groq, skip with --no-ragas),
+4) report (outcomes, latency, threshold sweep, IR metrics, RAGAS).
 
-It runs your actual pipeline — the same ask() the chatbot uses — so both scope
-guards fire, retrieval runs against the real index, and Groq generates the
-answers. Then it reports the things a single average hides.
+Unlike evaluate_llm_vs_rag.py: separates refusals from bad answers, reports
+score distributions not just means, sweeps SIMILARITY_THRESHOLD, and scores
+retrieval with plain IR metrics instead of an LLM judge.
 
-What it does, in four phases
-----------------------------
-  PHASE 1  Retrieval only, no LLM. Scores every question against the index and
-           records the raw similarity scores. Free and instant. This is what
-           makes the threshold sweep possible without re-querying.
-
-  PHASE 2  Full ask() per question. Uses Groq: the LLM scope classifier runs,
-           then generation. Records which of the four outcomes happened, the
-           answer, the sources and the latency.
-
-  PHASE 3  RAGAS scoring of the answers that were actually produced. Uses Groq
-           again. Skip with --no-ragas if you are rate-limited.
-
-  PHASE 4  The report.
-
-Why bother, when evaluate_llm_vs_rag.py already exists
-------------------------------------------------------
-Four differences, each of which hid something in the original run:
-
-  * Refusals are counted separately from bad answers. In the dissertation both
-    produced identical zero scores, which is why a scope-guard bug went
-    unnoticed — the only difference was the returned string.
-
-  * Scores are reported as distributions, not means. A context recall of 0.400
-    across five questions was really [1, 1, 0, 0, 0]. The mean describes none
-    of those five values.
-
-  * The similarity threshold is swept. SIMILARITY_THRESHOLD = 0.35 was chosen
-    by hand and never validated; this shows what the choice costs.
-
-  * Retrieval is measured with plain arithmetic (precision@k, recall@k, MRR,
-    nDCG) instead of an LLM's opinion — if you label which reviews are
-    relevant. No judge, no API calls, same answer every time.
-
-Usage
------
+Usage:
     python evaluate/rag_check.py                  # everything
-    python evaluate/rag_check.py --no-ragas       # skip phase 3 (fewer API calls)
+    python evaluate/rag_check.py --no-ragas       # skip phase 3
     python evaluate/rag_check.py --limit 5        # first 5 questions only
     python evaluate/rag_check.py --delay 3        # 3s between questions
 
-First run creates evaluate/rag_check_questions.json. Edit it to add your own
-questions, relevant review IDs, and reference answers.
+First run creates evaluate/rag_check_questions.json - edit it to add questions.
 """
 
 from __future__ import annotations
@@ -84,25 +47,15 @@ K = 5
 FETCH_K = 20
 SWEEP = [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60]
 
-# ask() defines this string inside the function, so it can't be imported.
-# Matching on the literal is fragile — and that fragility is exactly the
-# problem: the pipeline signals *why* it refused only through the text it
-# returns. The right fix is a structured refusal_reason field. Until then,
-# this is how you tell the two refusals apart.
+# ask() defines this inline so it can't be imported; fragile string match,
+# but it's how we tell the two refusal types apart (no refusal_reason field yet).
 NO_EVIDENCE_MSG = "I couldn't find enough relevant customer reviews to answer this question."
 
 
-# ---------------------------------------------------------------------------
-# Question set.
-#
-#   relevant  — review IDs that genuinely answer this question. Leave empty and
-#               the IR metrics are skipped. To fill in: run once, read the IDs
-#               the script prints, paste back the good ones.
-#   reference — a short correct answer. Needed for RAGAS context precision and
-#               recall. Leave empty and those two metrics are skipped for that
-#               question; faithfulness and answer relevancy still run.
-#   kind      — what the question is testing. Never average across kinds.
-# ---------------------------------------------------------------------------
+# Question set fields:
+#   relevant  — review IDs that answer it; empty skips IR metrics
+#   reference — short correct answer; empty skips RAGAS context precision/recall
+#   kind      — what's being tested; never average across kinds
 STARTER_QUESTIONS = [
     {"kind": "narrow", "q": "Why are customers unhappy with battery life?",
      "relevant": [], "reference": ""},
@@ -145,7 +98,7 @@ def load_questions() -> list[dict]:
         return json.load(fh)
 
 
-# ------------------------------------------------------------------ metrics
+# metrics
 def precision_at_k(retrieved, relevant, k):
     """Of the k reviews shown, what fraction were relevant?"""
     top = retrieved[:k]
@@ -192,7 +145,7 @@ def classify(answer: str) -> str:
     return "answered"
 
 
-# ------------------------------------------------------------------ phases
+# phases
 def phase1_retrieval(vectorstore, questions):
     """Raw similarity scores. No LLM, so this is free and instant."""
     print("=" * 78)
@@ -240,13 +193,8 @@ def phase2_pipeline(questions, delay):
 
 
 def phase3_ragas(questions):
-    """
-    RAGAS on the questions that actually produced an answer.
-
-    Refused questions are excluded on purpose. Scoring a refusal gives zeros
-    that look identical to a hallucinating answer, which is precisely the
-    confusion this script exists to remove.
-    """
+    """RAGAS on answered questions only - scoring a refusal gives zeros
+    indistinguishable from a hallucination, which defeats the point."""
     print("=" * 78)
     print("PHASE 3 — RAGAS scoring (Groq)")
     print("=" * 78)
@@ -265,8 +213,7 @@ def phase3_ragas(questions):
         print(f"  RAGAS not available ({exc}). Skipping.\n")
         return questions
 
-    # context_precision and context_recall need a reference answer; the other
-    # two do not. Only ask for what the data can actually support.
+    # context_precision/recall need a reference answer; skip without one.
     have_refs = all(q.get("reference") for q in answered)
     metrics = [faithfulness, answer_relevancy]
     if have_refs:
@@ -275,10 +222,8 @@ def phase3_ragas(questions):
         print("  No reference answers set, so context precision/recall are skipped.")
         print("  Add a 'reference' to each question in the JSON to enable them.\n")
 
-    # Field names must match the installed RAGAS schema. The older
-    # question/answer/contexts/ground_truth names are silently dropped by
-    # pydantic, producing samples of all-None and scores computed on nothing,
-    # with no error anywhere. Same trap evaluate_llm_vs_rag.py documents.
+    # RAGAS schema needs these exact field names; old names (question/answer/
+    # contexts/ground_truth) get silently dropped by pydantic -> all-None, no error.
     data = {
         "user_input": [q["q"] for q in answered],
         "response": [q["answer"] for q in answered],
@@ -302,13 +247,13 @@ def phase3_ragas(questions):
     return questions
 
 
-# ------------------------------------------------------------------ report
+# report
 def phase4_report(questions):
     print("=" * 78)
     print("PHASE 4 — REPORT")
     print("=" * 78)
 
-    # 1 ── per question ------------------------------------------------------
+    # 1. per question
     print("\n1. WHAT HAPPENED TO EACH QUESTION")
     print("-" * 78)
     print(f"{'kind':<13}{'outcome':<22}{'top sim':>9}{'ms':>8}  question")
@@ -317,7 +262,7 @@ def phase4_report(questions):
         print(f"{q['kind']:<13}{q['outcome']:<22}{top:>9}"
               f"{q.get('latency_ms', 0):>8.0f}  {q['q'][:30]}")
 
-    # 2 ── outcomes ----------------------------------------------------------
+    # 2. outcomes
     print("\n2. OUTCOMES  (refusals kept separate from answers, on purpose)")
     print("-" * 78)
     for outcome in ("answered", "refused_no_evidence", "refused_out_of_scope",
@@ -334,7 +279,7 @@ def phase4_report(questions):
         for q in leaked:
             print(f"    LEAKED: {q['q']}  ->  {q['outcome']}")
 
-    # 3 ── latency by outcome ------------------------------------------------
+    # 3. latency by outcome
     print("\n3. LATENCY BY OUTCOME  (a refusal should be much cheaper)")
     print("-" * 78)
     for outcome in ("answered", "refused_no_evidence", "refused_out_of_scope"):
@@ -342,13 +287,13 @@ def phase4_report(questions):
         if lat:
             print(f"  {outcome:<24}{describe(lat)}")
 
-    # 4 ── similarity distribution ------------------------------------------
+    # 4. similarity distribution
     print("\n4. SIMILARITY SCORES  (the shape, not just the average)")
     print("-" * 78)
     print(f"  Best score per question:  {describe([max(q['scores']) for q in questions if q.get('scores')])}")
     print(f"  Every candidate score:    {describe([s for q in questions for s in q.get('scores', [])])}")
 
-    # 5 ── threshold sweep ---------------------------------------------------
+    # 5. threshold sweep
     print(f"\n5. THRESHOLD SWEEP  (pipeline uses {SIMILARITY_THRESHOLD})")
     print("-" * 78)
     print("  Higher threshold = refuses more, hallucinates less. Which mistake")
@@ -366,7 +311,7 @@ def phase4_report(questions):
         print(f"  {t:>10.2f}{answered:>14}{len(in_scope) - answered:>14}"
               f"{statistics.mean(kept) if kept else 0:>12.1f}{marker}")
 
-    # 6 ── IR metrics --------------------------------------------------------
+    # 6. retrieval quality (arithmetic, no LLM judge)
     print("\n6. RETRIEVAL QUALITY  (arithmetic, no LLM judge)")
     print("-" * 78)
     labelled = [q for q in questions if q.get("relevant")]
@@ -407,7 +352,7 @@ def phase4_report(questions):
         print("\n  Caveat: the same model family generates and grades. Treat these")
         print("  as indicative. An independent judge would be a stronger design.")
 
-    # save -------------------------------------------------------------------
+    # save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = os.path.join(OUTPUT_DIR, "rag_check.json")
     with open(out, "w", encoding="utf-8") as fh:

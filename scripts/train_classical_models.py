@@ -64,7 +64,7 @@ from sklearn.metrics import (
 from config import settings
 
 
-#Phase 0: Load dataset 
+# Phase 0: Load dataset
 def load_dataset() -> pd.DataFrame:
     """
     Load and clean the preprocessed review dataset.
@@ -96,7 +96,7 @@ def load_dataset() -> pd.DataFrame:
     return df
 
 
-# Phase 1: Data preparation & feature engineering 
+# Phase 1: Data preparation & feature engineering
 def prepare_data( df: pd.DataFrame,) -> tuple[list[str], list[str], list[int], list[int], TfidfVectorizer]:
     """
     Encode labels, split into train/test sets, and fit a TF-IDF vectoriser.
@@ -120,15 +120,13 @@ def prepare_data( df: pd.DataFrame,) -> tuple[list[str], list[str], list[int], l
     X: list[str] = df["cleaned_text"].tolist()
     y: list[int] = df["label_id"].tolist()
 
-    # Stratified 80/20 split — stratify=y preserves class proportions in both halves
-    # random_state=42 ensures reproducibility across runs
+    # stratify=y preserves class proportions; random_state=42 for reproducibility
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     print(f"\n   Train: {len(X_train):,} | Test: {len(X_test):,}")
 
-    # ── TF-IDF feature extraction ─────────────────────────────────────────────
-    # Fit ONLY on training data to prevent data leakage into the test split
+    # TF-IDF feature extraction — fit ONLY on training data to prevent leakage into the test split
     print("\n Fitting TF-IDF vectoriser...")
     vectorizer = TfidfVectorizer(
         max_features=50000,       # cap vocabulary to top 50k terms by frequency
@@ -144,7 +142,7 @@ def prepare_data( df: pd.DataFrame,) -> tuple[list[str], list[str], list[int], l
     return X_train, X_test, y_train, y_test, vectorizer
 
 
-# Phase 2: Hyperparameter tuning 
+# Phase 2: Hyperparameter tuning
 
 def tune_logistic_regression(X_train_vec: Any, y_train: list[int]) -> float:
     """
@@ -159,9 +157,7 @@ def tune_logistic_regression(X_train_vec: Any, y_train: list[int]) -> float:
     """
     print("\nGridSearchCV — Logistic Regression (C values: 0.01 → 10.0)...")
 
-    # C controls regularisation strength: small C → strong regularisation (simpler model)
-    # Large C → weak regularisation (fits training data more closely, risk of overfitting)
-    # We search log-scale: 0.01, 0.1, 1.0, 5.0, 10.0
+    # C: regularisation strength (small = simpler model, large = risk of overfitting)
     lr_param_grid: dict[str, list[float]] = {"C": [0.01, 0.1, 1.0, 5.0, 10.0]}
 
     lr_grid = GridSearchCV(
@@ -198,9 +194,7 @@ def tune_naive_bayes(X_train_vec: Any, y_train: list[int]) -> float:
     """
     print("\n GridSearchCV — Naive Bayes (alpha values: 0.01 → 1.0)...")
 
-    # alpha = Laplace smoothing parameter
-    # alpha=1.0 → full Laplace smoothing (classic NB, avoids zero probabilities)
-    # alpha→0   → minimal smoothing (more sensitive to seen words, less robust)
+    # alpha: Laplace smoothing (1.0 = classic NB, near 0 = minimal smoothing)
     nb_param_grid: dict[str, list[float]] = {"alpha": [0.01, 0.05, 0.1, 0.5, 1.0]}
 
     nb_grid = GridSearchCV(
@@ -224,7 +218,7 @@ def tune_naive_bayes(X_train_vec: Any, y_train: list[int]) -> float:
     return best_nb_alpha
 
 
-#  Phase 3: Final model training 
+# Phase 3: Final model training
 def train_models(
     X_train_vec: Any,
     X_test_vec:  Any,
@@ -251,8 +245,7 @@ def train_models(
     print("  PHASE 2: Training Final Models with Best Hyperparameters")
     print("=" * 60)
 
-    # Logistic Regression
-    # Re-train on the FULL training set using the best C found by GridSearchCV
+    # Re-train on the full training set using the best C from GridSearchCV
     print(f"\n Training Logistic Regression (C={best_lr_C})...")
     lr = LogisticRegression(
     C=best_lr_C,
@@ -275,8 +268,7 @@ def train_models(
         digits=4,
     ))
 
-    # ── Naive Bayes ───────────────────────────────────────────────────────────
-    # Re-train on the FULL training set using the best alpha from GridSearchCV
+    # Re-train on the full training set using the best alpha from GridSearchCV
     print(f"\n  Training Naive Bayes (alpha={best_nb_alpha})...")
     nb = MultinomialNB(alpha=best_nb_alpha)   # Laplace/Lidstone smoothing
     nb.fit(X_train_vec, y_train)
@@ -295,7 +287,7 @@ def train_models(
     return lr, nb, lr_preds, nb_preds, lr_acc, nb_acc
 
 
-# ── Phase 4: Cross-validation ─────────────────────────────────────────────────
+# Phase 4: Cross-validation
 
 def cross_validate(
     X_train:       list[str],
@@ -323,9 +315,6 @@ def cross_validate(
     print("\n" + "═" * 60)
     print("  PHASE 3: 5-Fold StratifiedKFold Cross-Validation")
     print("=" * 60)
-    # Note: vectoriser vocabulary is fixed from the full train set
-    # Only IDF weights are re-computed per fold — this is standard practice
-    # and avoids the prohibitive cost of re-fitting vocab for each fold
     print()
 
     # shuffle=True avoids any ordering bias in the original dataset
@@ -346,7 +335,7 @@ def cross_validate(
         X_tr_v  = vectorizer.transform(X_tr)
         X_val_v = vectorizer.transform(X_val)
 
-        # ── LR fold ──────────────────────────────────────────────────────────
+        # LR fold
         lr_fold = LogisticRegression(
     C=best_lr_C,
     max_iter=3000,
@@ -359,7 +348,7 @@ def cross_validate(
                                 average="macro", zero_division=0))
         lr_cv_scores.append(lr_f1)
 
-        # ── NB fold ──────────────────────────────────────────────────────────
+        # NB fold
         nb_fold = MultinomialNB(alpha=best_nb_alpha)
         nb_fold.fit(X_tr_v, y_tr)
         nb_f1 = float(f1_score(y_val, nb_fold.predict(X_val_v),
@@ -368,8 +357,7 @@ def cross_validate(
 
         print(f"   Fold {fold}/5  │  LR F1={lr_f1:.4f}  │  NB F1={nb_f1:.4f}")
 
-    # Aggregate across folds — mean ± std gives dissertation readers a
-    # sense of how stable the model is across different data splits
+    # mean ± std shows how stable the model is across splits
     lr_cv_mean = float(np.mean(lr_cv_scores))
     lr_cv_std  = float(np.std(lr_cv_scores))
     nb_cv_mean = float(np.mean(nb_cv_scores))
@@ -381,7 +369,7 @@ def cross_validate(
     return lr_cv_mean, lr_cv_std, nb_cv_mean, nb_cv_std
 
 
-# Phase 5: Save models 
+# Phase 5: Save models
 
 def save_models(
     vectorizer: TfidfVectorizer,
@@ -396,12 +384,9 @@ def save_models(
         lr:         Trained Logistic Regression model.
         nb:         Trained Naive Bayes model.
     """
-    # Create output directory if it doesn't exist yet
     os.makedirs("models/classical", exist_ok=True)
 
-    # Pickle each artefact in binary write mode ("wb")
-    # The vectoriser must be saved alongside models — transform() at inference
-    # time must use the same vocabulary that was built during training
+    # Vectoriser is saved alongside the models -- transform() at inference must use the same vocab built during training
     with open("models/classical/tfidf_vectorizer.pkl",    "wb") as f:
         pickle.dump(vectorizer, f)
     with open("models/classical/logistic_regression.pkl", "wb") as f:
@@ -444,7 +429,6 @@ def log_models_to_mlflow(
     print("=" * 60)
     print("\n  Logging runs to MLflow...")
 
-    # ── Logistic Regression run ───────────────────────────────────────────────
     # Each `with mlflow.start_run(...)` block creates a separate tracked run
     with mlflow.start_run(run_name="Logistic Regression - Training"):
         mlflow.set_tag("model_type", "classical_ml")   # tag for filtering in MLflow UI
@@ -474,8 +458,7 @@ def log_models_to_mlflow(
             "cv_f1_std":   round(lr_cv_std,  4),   # stability metric for the dissertation
         })
 
-        # Register in the MLflow Model Registry under a named model
-        # This allows staging (None → Staging → Production) and versioning
+        # Registers in the Model Registry, enabling stage transitions (None -> Staging -> Production)
         mlflow.sklearn.log_model(
             lr,
             artifact_path="model",
@@ -483,7 +466,6 @@ def log_models_to_mlflow(
         )
         print("  Logistic Regression logged + registered in MLflow Registry")
 
-    # ── Naive Bayes run ───────────────────────────────────────────────────────
     with mlflow.start_run(run_name="Naive Bayes - Training"):
         mlflow.set_tag("model_type", "classical_ml")
 
@@ -517,7 +499,7 @@ def log_models_to_mlflow(
         print("   Naive Bayes logged + registered in MLflow Registry")
 
 
-# ── Phase 7: Model promotion ──────────────────────────────────────────────────
+# Phase 7: Model promotion
 
 def promote_best_model(lr_acc: float, nb_acc: float) -> None:
     """
@@ -535,14 +517,11 @@ def promote_best_model(lr_acc: float, nb_acc: float) -> None:
     client = MlflowClient()
 
     try:
-        # Fetch all registered versions of the best model from the registry
         versions = client.search_model_versions(f"name='{best_name}'")
         if versions:
-            # Sort by version number to get the most recent one
             latest_v = sorted(versions, key=lambda v: int(v.version))[-1].version
 
-            # Transition to Production; archive_existing_versions=True demotes
-            # any previous Production version → keeps registry clean
+            # archive_existing_versions=True demotes any previous Production version
             client.transition_model_version_stage(
                 name=best_name,
                 version=latest_v,
@@ -552,13 +531,12 @@ def promote_best_model(lr_acc: float, nb_acc: float) -> None:
             print(f"    {best_name} v{latest_v} → promoted to 'Production'")
 
     except Exception as exc:
-        # MLflow 2.x deprecated stage transitions in favour of model aliases
-        # Gracefully skip rather than crash — models are still registered and usable
+        # MLflow 2.x deprecated stage transitions; skip rather than crash -- model is still registered
         print(f"    Model Registry stage transition skipped ({exc.__class__.__name__})")
         print(f"      Best classical model: {best_name}")
 
 
-# ── Final summary ─────────────────────────────────────────────────────────────
+# Final summary
 
 def print_summary(
     lr_acc:     float,
@@ -591,23 +569,21 @@ def print_summary(
    
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 
 def main() -> None:
     """Run the full classical ML training pipeline end-to-end."""
 
-    # Point MLflow at the local tracking server and create/select experiment
     mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
     mlflow.set_experiment(settings.MLFLOW_EXPERIMENT)
 
-    #Phase 0: Load 
+    # Phase 0: Load
     df = load_dataset()
 
     # Phase 1: Prepare — split + fit TF-IDF vectoriser
     X_train, X_test, y_train, y_test, vectorizer = prepare_data(df)
 
-    # Transform raw text into sparse TF-IDF matrices for sklearn
-    # Important: vectorizer was fit on X_train only — transform() both splits here
+    # vectorizer was fit on X_train only -- transform() both splits here
     X_train_vec = vectorizer.transform(X_train)
     X_test_vec  = vectorizer.transform(X_test)
 
@@ -623,7 +599,7 @@ def main() -> None:
         X_train_vec, X_test_vec, y_train, y_test, best_lr_C, best_nb_alpha
     )
 
-    #Phase 4: Cross-validate — 5-fold StratifiedKFold robustness check
+    # Phase 4: Cross-validate — 5-fold StratifiedKFold robustness check
     lr_cv_mean, lr_cv_std, nb_cv_mean, nb_cv_std = cross_validate(
         X_train, y_train, vectorizer, best_lr_C, best_nb_alpha
     )
@@ -631,7 +607,7 @@ def main() -> None:
     # Phase 5: Save — pickle models to disk
     save_models(vectorizer, lr, nb)
 
-    # Phase 6: MLflow — log params, metrics, and register models 
+    # Phase 6: MLflow — log params, metrics, and register models
     log_models_to_mlflow(
         lr, nb, y_test, lr_preds, nb_preds,
         X_train, X_test,
@@ -639,7 +615,7 @@ def main() -> None:
         lr_cv_mean, lr_cv_std, nb_cv_mean, nb_cv_std,
     )
 
-    # Phase 7: Promote — push the better model to Production stage 
+    # Phase 7: Promote — push the better model to Production stage
     promote_best_model(lr_acc, nb_acc)
 
     # Final summary

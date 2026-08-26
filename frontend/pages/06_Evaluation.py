@@ -1,11 +1,8 @@
 """
 Evaluation - Model & Pipeline Performance
 
-Presents the offline evaluation results already produced by the scripts/
-evaluate_*.py suite: sentiment classifier comparison, retrieval quality
-(TF-IDF vs semantic search), and RAG/RAGAS results. This page only reads
-and displays results that already exist on disk (via the backend) — it
-does not run any evaluation itself.
+Reads and displays results already produced by scripts/evaluate_*.py — sentiment,
+retrieval (TF-IDF vs semantic) and RAG/RAGAS. Runs nothing itself.
 """
 
 import os

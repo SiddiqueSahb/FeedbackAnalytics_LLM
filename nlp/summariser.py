@@ -32,27 +32,16 @@ EMPTY_ANALYSIS = {
     "executive_summary": "",
 }
 
-# Minimum relevance score a retrieved "similar review" must clear before it is
-# allowed into this prompt as supporting evidence. Same basis as
-# rag.pipeline.SIMILARITY_THRESHOLD — both scores come from the same FAISS
-# index over normalised embeddings (nlp/embedding_service.py). Without this,
-# semantic_search always returns its top-5 nearest neighbours regardless of
-# how weak the match is, and the LLM has no signal that "Similar Review 3" is
-# only 0.28 similar — it just gets told to use it as evidence. See
-# docs/Analyse_LLM_Audit.md Issue 1.
+# Min relevance score for a "similar review" to enter the prompt as evidence;
+# same basis as rag.pipeline.SIMILARITY_THRESHOLD. See Analyse_LLM_Audit#1.
 ANALYSE_SIMILARITY_THRESHOLD = 0.35
 
 NO_SIMILAR_REVIEWS_MARKER = "(No sufficiently similar historical reviews found.)"
 
 
 class ReviewAnalysisLLM(BaseModel):
-    """
-    Schema the LLM's JSON response must conform to. Validated explicitly after
-    parsing — JsonOutputParser on its own only guarantees valid JSON, not that
-    the keys/types/enums match what the rest of the app expects (a missing
-    key or an out-of-enum severity would otherwise pass through untouched).
-    See docs/Analyse_LLM_Audit.md Issue 4.
-    """
+    """Schema the LLM's JSON response must conform to -- JsonOutputParser alone
+    only guarantees valid JSON, not that keys/types/enums match. See Audit#4."""
 
     summary: str
     keywords: list[str] = Field(min_length=5, max_length=5)
@@ -66,7 +55,6 @@ class ReviewAnalysisLLM(BaseModel):
     executive_summary: str
 
 
-# Prompt Template
 prompt = ChatPromptTemplate.from_template(
 """
 You are a Senior Customer Experience Analyst.
@@ -190,12 +178,8 @@ Return ONLY JSON.
 )
 
 
-# Loaded lazily on first use, not at import time — importing this module
-# (which happens transitively the moment backend.main starts) used to raise
-# RuntimeError immediately if GROQ_API_KEY was blank, crashing the entire
-# API before it could bind to a port, not just the one endpoint that needs
-# the LLM. Now a missing key only fails the call that actually needs it,
-# and that failure is already caught below and turned into EMPTY_ANALYSIS.
+# Lazy, not at import time -- used to raise RuntimeError on import if
+# GROQ_API_KEY was blank, crashing the whole API before it could bind a port.
 @lru_cache(maxsize=1)
 def _get_chain():
     if not settings.GROQ_API_KEY:
@@ -208,32 +192,15 @@ def _get_chain():
         timeout=30,
     )
 
-    # Bind the schema at the model-call level (Groq tool-calling) rather than
-    # relying on the prompt's written-out JSON example plus a free-text
-    # JsonOutputParser. On llama-3.1-8b-instant specifically, the prompt-only
-    # approach was observed to silently drop a required key (executive_summary)
-    # in ~2/3 of calls when the retrieved-reviews context was short/empty —
-    # each one degrading to EMPTY_ANALYSIS via the post-hoc validation added
-    # for docs/Analyse_LLM_Audit.md Issue 4. Structured output constrains
-    # generation itself, not just validates it after the fact, so incomplete
-    # responses should become rare rather than being caught-and-discarded.
+    # Structured output (tool-calling), not prompt+JsonOutputParser -- the latter
+    # had llama-3.1-8b-instant silently drop executive_summary ~2/3 of the time.
     return prompt | llm.with_structured_output(ReviewAnalysisLLM)
 
 
 def _recover_from_failed_tool_call(exc: Exception):
-    """
-    Rescue a valid analysis from a Groq `tool_use_failed` error.
-
-    Some models write the requested JSON as ordinary content rather than as a
-    tool call. Groq rejects the response with HTTP 400 and code
-    `tool_use_failed`, but includes what the model actually wrote in the error
-    body under `failed_generation`. That text is usually the complete answer.
-
-    Returns the validated analysis as a dict, or None if this was a different
-    error, or if the payload doesn't validate — in which case the caller falls
-    through to EMPTY_ANALYSIS exactly as before. Nothing is trusted that the
-    schema wouldn't have accepted from a tool call.
-    """
+    """Rescue a valid analysis from Groq's `tool_use_failed` error -- some models
+    write JSON as content, not a tool call, but Groq still returns it via
+    `failed_generation`. Returns a dict, or None if it doesn't validate."""
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
         # Older/other client versions surface the payload only in the message.
@@ -264,10 +231,6 @@ def _recover_from_failed_tool_call(exc: Exception):
         return None
 
 
-# ----------------------------------------------------------------------
-# Main Function
-# ----------------------------------------------------------------------
-
 def analyse_review_with_llm(
     text: str,
     sentiment: str,
@@ -275,9 +238,7 @@ def analyse_review_with_llm(
     similar_reviews: list[dict],
 ) -> dict:
 
-    # Drop weak matches before they ever reach the prompt — the LLM should
-    # never be told a "similar review" is supporting evidence when it isn't
-    # actually similar. See ANALYSE_SIMILARITY_THRESHOLD above.
+    # Drop weak matches -- never tell the LLM a weak match is supporting evidence.
     grounded_reviews = [
         r for r in similar_reviews
         if r.get("similarity_score", 0) >= ANALYSE_SIMILARITY_THRESHOLD
@@ -295,20 +256,14 @@ def analyse_review_with_llm(
                 f"Review: {review.get('text', '')[:250]}\n"
             )
     else:
-        # Explicit absence marker, not just an empty string — the prompt's
-        # instruction 3 branches on this text being present. An empty string
-        # left the model free to quietly fabricate what "similar reviews"
-        # might have said; this makes the absence unambiguous. See
-        # docs/Analyse_LLM_Audit.md Issue 3.
+        # Explicit marker, not empty string -- prompt instruction 3 branches on
+        # this; an empty string let the model fabricate "similar reviews" content.
         rag_context = NO_SIMILAR_REVIEWS_MARKER
 
     log.info("Generating LLM business analysis")
     try:
-        # with_structured_output(ReviewAnalysisLLM) means `result` is already
-        # a validated ReviewAnalysisLLM instance (or raises) — the model's
-        # tool-call arguments are schema-constrained at generation time, not
-        # just checked after the fact. See _get_chain()'s comment for why
-        # this replaced the plain JsonOutputParser + post-hoc validate.
+        # result is already a validated ReviewAnalysisLLM instance (or raises) --
+        # schema-constrained at generation time; see _get_chain().
         result = _get_chain().invoke(
         {
             "review": text[:600],
@@ -325,16 +280,8 @@ def analyse_review_with_llm(
         return EMPTY_ANALYSIS.copy()
 
     except Exception as exc:
-        # Not every model on Groq emits tool calls reliably. with_structured_output()
-        # is implemented as a tool call, so a model that writes the JSON as ordinary
-        # content gets rejected by the API with `tool_use_failed` — even when the JSON
-        # it produced is complete and correct. openai/gpt-oss-20b does exactly this.
-        #
-        # Groq returns that content in the error body as `failed_generation`, so the
-        # answer is recoverable: validate it against the same schema the tool call
-        # would have been checked against. If it validates, nothing has been relaxed —
-        # the guarantee comes from ReviewAnalysisLLM either way, only the transport
-        # differed.
+        # openai/gpt-oss-20b (and others) write JSON as content instead of a tool
+        # call, so Groq rejects it as tool_use_failed -- recover and validate it.
         recovered = _recover_from_failed_tool_call(exc)
         if recovered is not None:
             log.warning(

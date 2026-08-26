@@ -3,10 +3,8 @@ Review Analysis — run a single review through the full FeedbackIQ pipeline:
 sentiment, complaint category, similar past reviews and an LLM business
 summary.
 
-Results are grouped into tabs rather than stacked down one page. The pipeline
-has four distinct stages and reading them as one scroll made it hard to tell
-which output came from which stage — which is the thing this page exists to
-show.
+Tabbed rather than stacked — one scroll made it hard to tell which output came
+from which stage.
 """
 
 import os
@@ -45,8 +43,7 @@ EXAMPLE = (
     "replied to my emails."
 )
 
-# Model options come from the backend so the list can't drift out of sync with
-# what the API actually supports.
+# Model list comes from the backend so it can't drift out of sync with the API.
 model_options = api_get("/api/sentiment/models")
 if not isinstance(model_options, list) or not model_options:
     model_options = [{"id": "distilbert", "name": "DistilBERT (fine-tuned)", "tier": ""}]
@@ -54,7 +51,7 @@ if not isinstance(model_options, list) or not model_options:
 model_labels = {m["id"]: f"{m['name']} — {m['tier']}".strip(" —") for m in model_options}
 model_choices = list(model_labels.keys())
 
-# ── Input ───────────────────────────────────────────────────────────────────
+# Input
 col_text, col_opts = st.columns([3, 1])
 
 with col_text:
@@ -95,7 +92,7 @@ with example_col:
 
 st.divider()
 
-# ── Empty state ─────────────────────────────────────────────────────────────
+# Empty state
 if not analyse_clicked:
     with st.container(border=True):
         st.markdown("**What this will show**")
@@ -111,7 +108,7 @@ if not analyse_clicked:
                 st.markdown(f"**{stage}**")
                 st.caption(detail)
 
-# ── Results ─────────────────────────────────────────────────────────────────
+# Results
 if analyse_clicked:
 
     if len(review_text.strip()) < 3:
@@ -133,7 +130,7 @@ if analyse_clicked:
                 ["Sentiment", "Complaint category", "Business analysis", "Similar reviews"]
             )
 
-            # ── Sentiment ───────────────────────────────────────────────────
+            # Sentiment
             with tab_sent:
                 left, right = st.columns([1, 2])
 
@@ -166,7 +163,7 @@ if analyse_clicked:
                     else:
                         st.caption("This model does not expose per-class scores.")
 
-            # ── Category ────────────────────────────────────────────────────
+            # Category
             with tab_cat:
                 primary = result.get("category", "N/A")
                 if str(primary).lower().startswith("unclassified"):
@@ -185,7 +182,7 @@ if analyse_clicked:
                     st.dataframe(pd.DataFrame(categories),
                                  use_container_width=True, hide_index=True)
 
-            # ── LLM analysis ────────────────────────────────────────────────
+            # LLM analysis
             with tab_llm:
                 if analysis.get("summary"):
                     facts = st.columns(3)
@@ -215,7 +212,7 @@ if analyse_clicked:
                         "has not been exhausted."
                     )
 
-            # ── Similar reviews ─────────────────────────────────────────────
+            # Similar reviews
             with tab_similar:
                 similar = result.get("similar_reviews", [])
                 if similar:
@@ -228,7 +225,7 @@ if analyse_clicked:
                 else:
                     st.caption("No similar reviews were found in the index.")
 
-# ── Model comparison ────────────────────────────────────────────────────────
+# Model comparison
 with st.expander("Compare all five sentiment models on this review"):
     st.caption(
         "The disagreements are the interesting part. Across the corpus the ranking "

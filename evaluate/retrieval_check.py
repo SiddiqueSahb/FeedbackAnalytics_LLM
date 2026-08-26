@@ -1,45 +1,16 @@
 """
-A simple, standalone check on the RETRIEVAL half of the RAG pipeline.
+Retrieval-only check on the RAG pipeline. No LLM calls, so it's free, fast,
+and deterministic. Not part of the dissertation results - writes to its own
+folder (data/results/retrieval_check/).
 
-Read this first
----------------
-This file is a learning/diagnostic tool. It is NOT part of the dissertation
-results. It writes to its own folder (data/results/retrieval_check/) and
-touches nothing that evaluate_llm_vs_rag.py produced.
+Reports: per-question outcome, similarity score distribution, a threshold
+sweep against SIMILARITY_THRESHOLD (0.35, chosen by hand, never validated),
+and IR metrics (precision@k, recall@k, MRR, nDCG@k) once you label
+"relevant" review IDs in the questions file.
 
-Why it exists
--------------
-The dissertation evaluated the whole RAG pipeline with RAGAS, where a language
-model reads the answers and scores them. That works, but it has two problems:
-
-  1. A model grading a model is subjective and costs API calls.
-  2. When a score is bad, you cannot tell whether retrieval fetched the wrong
-     reviews or the generator wrote a bad answer from good reviews.
-
-This script looks at retrieval ONLY. No LLM is called, so it is free, fast and
-gives the same answer every time you run it. If retrieval is the problem, this
-tells you — and the dissertation's own numbers (context precision 0.416,
-context recall 0.400) suggest it is.
-
-What it reports
----------------
-  1. What happens to each question — answered, or refused, and why.
-  2. The similarity scores retrieval actually produced, as a distribution
-     rather than a single average. (An average of 1,1,0,0,0 is 0.4, which
-     describes none of the five values.)
-  3. A THRESHOLD SWEEP: how many questions would be refused at different
-     values of SIMILARITY_THRESHOLD. The pipeline uses 0.35, chosen by hand
-     and never validated. This shows you what that choice costs.
-  4. If (and only if) you fill in the "relevant" review IDs in the questions
-     file, it also computes the standard information-retrieval metrics:
-     precision@k, recall@k, MRR and nDCG@k. These need no LLM at all.
-
-Usage
------
+Usage:
     python evaluate/retrieval_check.py
-
-    # first run creates evaluate/retrieval_questions.json — edit it to add
-    # your own questions, then run again
+    # first run creates evaluate/retrieval_questions.json - edit and rerun
 """
 
 from __future__ import annotations
@@ -67,18 +38,8 @@ FETCH_K = 20       # how many candidates FAISS scores before filtering
 SWEEP = [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60]
 
 
-# ---------------------------------------------------------------------------
-# Starter question set.
-#
-# "relevant" is the list of review IDs you consider correct answers for that
-# question. Leave it empty and the script still runs — it just skips the
-# precision/recall section. To fill it in: run the script once, look at the
-# review IDs it printed, and paste back the ones that genuinely answer the
-# question. That is the whole labelling process.
-#
-# The `kind` field groups questions by what they are testing. Averaging across
-# different kinds is how you end up with a number that describes nothing.
-# ---------------------------------------------------------------------------
+# "relevant" review IDs enable precision/recall (empty = skipped).
+# "kind" groups questions by what's tested; never average across kinds.
 STARTER_QUESTIONS = [
     # --- narrow, factual: retrieval should find these easily ---
     {"q": "Why are customers unhappy with battery life?", "kind": "narrow", "relevant": []},
@@ -116,11 +77,8 @@ def load_questions() -> list[dict]:
         return json.load(fh)
 
 
-# ---------------------------------------------------------------------------
-# Retrieval. Deliberately does NOT reuse _make_grounded_retriever, because we
-# want the raw scores BEFORE any threshold is applied — that is what lets us
-# sweep the threshold afterwards without re-querying the index.
-# ---------------------------------------------------------------------------
+# Doesn't reuse _make_grounded_retriever - we want raw scores before the
+# threshold is applied, so the sweep below can reuse them without re-querying.
 def retrieve_scored(vectorstore, question: str) -> list[tuple[str, float]]:
     """Return [(review_id, similarity_score), ...] for the top FETCH_K candidates."""
     platform_filter = _detect_platform_filter(question)
@@ -131,21 +89,10 @@ def retrieve_scored(vectorstore, question: str) -> list[tuple[str, float]]:
 
 
 def classify_outcome(question: str, scores: list[float], threshold: float) -> str:
-    """
-    Reproduce the pipeline's decision for one question.
-
-    The pipeline has two independent ways to say no, and they mean different
-    things. Collapsing them is what hid a real bug in the dissertation: a valid
-    question was refused by the scope guard, but because both refusals produce
-    identical zero scores, it looked like a retrieval failure for weeks.
-
-    IMPORTANT — this only reproduces the FIRST of the two scope guards.
-    The pipeline runs a keyword filter (is_complaint_question, free) and then
-    an LLM classifier (is_complaint_question_llm, costs an API call). Only the
-    keyword stage is checked here, deliberately, so this script stays free and
-    deterministic. So "answered" below means "the keyword guard let it
-    through" — the LLM stage may still reject it in the live pipeline.
-    """
+    """Reproduces the pipeline's decision, but only the keyword guard
+    (is_complaint_question) - not the LLM scope classifier that runs after
+    it live, which keeps this free and deterministic. So "answered" here
+    just means "passed the keyword guard"."""
     if not is_complaint_question(question):
         return "refused_out_of_scope"      # keyword guard rejected it
     if not any(s >= threshold for s in scores):
@@ -153,10 +100,7 @@ def classify_outcome(question: str, scores: list[float], threshold: float) -> st
     return "answered"
 
 
-# ---------------------------------------------------------------------------
-# Information-retrieval metrics. No LLM, no judgement — pure arithmetic on
-# "which IDs came back" against "which IDs you said were relevant".
-# ---------------------------------------------------------------------------
+# IR metrics - pure arithmetic, no LLM judge.
 def precision_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
     """Of the k reviews we showed, what fraction were relevant?"""
     top = retrieved[:k]
@@ -179,10 +123,7 @@ def mrr(retrieved: list[str], relevant: set[str]) -> float:
 
 
 def ndcg_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
-    """
-    Like precision, but position-aware: a relevant review at rank 1 is worth
-    more than the same review at rank 5. The log discount is the standard one.
-    """
+    """Position-aware precision - rank 1 worth more than rank 5."""
     dcg = sum(1.0 / math.log2(i + 1)
               for i, r in enumerate(retrieved[:k], start=1) if r in relevant)
     ideal = sum(1.0 / math.log2(i + 1)
@@ -191,13 +132,8 @@ def ndcg_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
 
 
 def describe(values: list[float]) -> str:
-    """
-    Summarise a list of numbers WITHOUT hiding its shape.
-
-    A mean on its own is misleading when the values are bimodal — the
-    dissertation's context recall of 0.400 is really [1, 1, 0, 0, 0], which
-    the mean describes not at all.
-    """
+    """Summarise without hiding the shape - a mean alone is misleading for
+    bimodal data (e.g. context recall 0.400 was really [1,1,0,0,0])."""
     if not values:
         return "no data"
     return (f"n={len(values)}  min={min(values):.3f}  "
@@ -217,8 +153,7 @@ def main() -> int:
         question, kind = item["q"], item.get("kind", "unspecified")
         relevant = set(item.get("relevant") or [])
 
-        # Out-of-scope questions never reach the index in the real pipeline,
-        # so don't query it for them either — just record the guard's verdict.
+        # Out-of-scope questions never reach the index in the real pipeline either.
         if not is_complaint_question(question):
             rows.append({"q": question, "kind": kind, "outcome": "refused_out_of_scope",
                          "scores": [], "ids": [], "relevant": relevant})
@@ -234,7 +169,7 @@ def main() -> int:
             "scores": scores, "ids": ids, "relevant": relevant,
         })
 
-    # ---------------------------------------------------------------- 1. per question
+    # 1. per question
     print("=" * 78)
     print("1. WHAT HAPPENED TO EACH QUESTION")
     print("=" * 78)
@@ -244,7 +179,7 @@ def main() -> int:
         top = f"{max(r['scores']):.3f}" if r["scores"] else "—"
         print(f"{r['kind']:<14}{r['outcome']:<24}{top:>10}  {r['q'][:34]}")
 
-    # ---------------------------------------------------------------- 2. outcomes
+    # 2. outcomes
     print("\n" + "=" * 78)
     print("2. OUTCOMES  (refusals kept separate from answers, on purpose)")
     print("=" * 78)
@@ -268,7 +203,7 @@ def main() -> int:
         print("  catch these. What this tells you is how much work that second stage")
         print("  is doing, and therefore how much an API outage would cost you.")
 
-    # ---------------------------------------------------------------- 3. score shape
+    # 3. score shape
     print("\n" + "=" * 78)
     print("3. SIMILARITY SCORES  (the shape, not just the average)")
     print("=" * 78)
@@ -277,7 +212,7 @@ def main() -> int:
     all_scores = [s for r in rows for s in r["scores"]]
     print(f"  Every candidate score:    {describe(all_scores)}")
 
-    # ---------------------------------------------------------------- 4. sweep
+    # 4. sweep
     print("\n" + "=" * 78)
     print(f"4. THRESHOLD SWEEP  (pipeline currently uses {SIMILARITY_THRESHOLD})")
     print("=" * 78)
@@ -301,7 +236,7 @@ def main() -> int:
         print(f"  {t:>10.2f}{answered:>12}{len(in_scope) - answered:>10}"
               f"{mean_kept:>19.1f}{marker}")
 
-    # ---------------------------------------------------------------- 5. IR metrics
+    # 5. IR metrics
     labelled = [r for r in rows if r["relevant"]]
     print("\n" + "=" * 78)
     print("5. RETRIEVAL QUALITY  (needs labels)")
@@ -333,7 +268,7 @@ def main() -> int:
         print("  MRR:         " + describe(mr))
         print("  nDCG@5:      " + describe(nd))
 
-    # ---------------------------------------------------------------- save
+    # save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = os.path.join(OUTPUT_DIR, "retrieval_check.json")
     with open(out, "w", encoding="utf-8") as fh:

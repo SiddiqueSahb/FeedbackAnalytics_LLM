@@ -1,23 +1,8 @@
 """
-Consolidated metric report for the five sentiment classifiers.
-===============================================================
-scripts/evaluate_models.py already computes accuracy, macro and weighted F1,
-macro precision and recall, confusion matrices and per-class reports. This
-script adds the metrics that comparison actually needs and that were missing:
-
-  · Macro and weighted precision, recall and F1 for every model side by side,
-    plus balanced accuracy derived from the saved confusion matrices. All
-    cover the full 128,539-review test set without re-running any model.
-
-  · Per-class precision, recall, F1 and support for every model in one table
-    instead of five separate JSON files.
-
-  · McNemar significance tests between every pair of models. Reporting that
-    one model scored higher than another says nothing about whether the
-    difference is real; this tests it. Computed from the paired predictions
-    cached by evaluate_sentiment_diagnostics.py.
-
-Nothing here re-runs inference. Everything is read from data/results/.
+Consolidated metric report for the five sentiment classifiers - adds what
+scripts/evaluate_models.py doesn't: side-by-side precision/recall/F1,
+balanced accuracy, per-class tables, and McNemar significance tests between
+model pairs. Reads only from data/results/, no re-inference.
 
 Outputs (data/results/metrics_summary/):
     overall_metrics.csv          headline metrics per model, full test set
@@ -25,8 +10,7 @@ Outputs (data/results/metrics_summary/):
     confusion_counts.csv         raw confusion matrix counts, long format
     significance_tests.csv       McNemar pairwise comparisons
 
-Usage:
-    python evaluate/generate_all_metrics.py
+Usage: python evaluate/generate_all_metrics.py
 """
 
 from __future__ import annotations
@@ -58,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("all_metrics")
 
 
-# ── metrics derived from a confusion matrix ─────────────────────────────────
+# metrics derived from a confusion matrix
 def balanced_accuracy(cm: np.ndarray) -> float:
     """Mean per-class recall. Unaffected by class imbalance."""
     recalls = np.diag(cm) / cm.sum(axis=1)
@@ -84,7 +68,7 @@ def load_report(slug: str) -> dict | None:
         return json.load(f)
 
 
-# ── table builders ──────────────────────────────────────────────────────────
+# table builders
 def overall_table() -> pd.DataFrame:
     """Headline metrics per model on the full held-out test set."""
     rows = []
@@ -150,19 +134,11 @@ def confusion_table() -> pd.DataFrame:
 
 
 def significance_table() -> pd.DataFrame:
-    """
-    McNemar's test between every pair of models.
-
-    The test looks only at cases where the two models disagree: b is the count
-    where A is right and B is wrong, c the reverse. Under the null hypothesis
-    that both are equally accurate, each discordant case is a coin flip, so an
-    exact binomial test on b out of b+c gives the p-value. Concordant cases
-    carry no information about which model is better and are excluded.
-
-    Uses the paired predictions cached by evaluate_sentiment_diagnostics.py,
-    which is a balanced sample rather than the full test set, so the accuracy
-    figures here differ slightly from the headline table.
-    """
+    """McNemar's test between every pair of models: b/c are the counts where
+    only one model is right, and an exact binomial test on b of b+c gives the
+    p-value (concordant cases carry no info). Uses the diagnostic sample cached
+    by evaluate_sentiment_diagnostics.py, so accuracies differ slightly from
+    the full-test-set headline table."""
     path = RESULTS / "sentiment_diagnostics" / "predictions.csv"
     if not path.exists():
         logger.warning("No cached predictions — run evaluate_sentiment_diagnostics.py first. "
