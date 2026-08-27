@@ -24,8 +24,17 @@ import pandas as pd
 
 from datasets import Dataset
 
-from rag.pipeline import ask, _get_llm
+from rag.pipeline import ask
 from config import settings
+
+# Dedicated tuning for the RAGAS judge LLM. Deliberately separate from
+# rag.pipeline._get_llm(), whose 30s timeout and unset max_tokens are
+# tuned for interactive chat latency -- faithfulness/context_precision/
+# context_recall ask the judge to emit a full JSON list of statements per
+# retrieved context, which needs materially more room and time to finish.
+RAGAS_JUDGE_MODEL = os.environ.get("RAGAS_JUDGE_MODEL", settings.GROQ_MODEL)
+RAGAS_JUDGE_MAX_TOKENS = int(os.environ.get("RAGAS_JUDGE_MAX_TOKENS", "8192"))
+RAGAS_JUDGE_TIMEOUT = int(os.environ.get("RAGAS_JUDGE_TIMEOUT", "90"))
 
 from langchain_groq import ChatGroq
 
@@ -100,6 +109,24 @@ def call_with_retry(fn, *args, max_retries: int = MAX_RATE_LIMIT_RETRIES, **kwar
             wait = _extract_retry_after_seconds(exc)
             print(f"    [rate limit] waiting {wait:.1f}s before retry ({attempt + 1}/{max_retries})...")
             time.sleep(wait)
+
+
+def _get_judge_llm() -> ChatGroq:
+    """Build the Groq client used to judge/score, not to generate answers.
+
+    Kept separate from rag.pipeline._get_llm(): that one is tuned for
+    interactive chat (timeout=30, no explicit max_tokens) and truncates
+    before the judge can finish a faithfulness/context_recall verdict on a
+    multi-context RAG sample, which ragas surfaces as
+    LLMDidNotFinishException. temperature=0 keeps scoring deterministic.
+    """
+    return ChatGroq(
+        api_key=settings.GROQ_API_KEY,
+        model_name=RAGAS_JUDGE_MODEL,
+        temperature=0,
+        max_tokens=RAGAS_JUDGE_MAX_TOKENS,
+        timeout=RAGAS_JUDGE_TIMEOUT,
+    )
 
 
 def _get_ragas_llm(llm) -> LangchainLLMWrapper:
@@ -341,10 +368,15 @@ print("✓ RAG dataset created")
 # OpenAI (fails, no key). max_workers=1 because Groq's free tier can't
 # handle 16 concurrent judge calls; ragas' own retry runs on top of this.
 
-judge_llm = _get_llm()
+judge_llm = _get_judge_llm()
 ragas_llm = _get_ragas_llm(judge_llm)
 ragas_embeddings = _get_ragas_embeddings()
-eval_run_config = RunConfig(max_workers=1, max_retries=10, max_wait=60)
+# max_retries=12 / max_wait=90: a bit more headroom than before -- weaker
+# open-weight judge models occasionally emit malformed JSON on the first
+# try (surfaces as OutputParserException), and ragas' own retry-with-fix
+# loop needs the room, not just this run_config, but extra slack here
+# reduces how often a sample gives up and reports NaN.
+eval_run_config = RunConfig(max_workers=1, max_retries=12, max_wait=90)
 
 # Evaluate LLM only
 

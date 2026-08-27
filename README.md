@@ -20,6 +20,8 @@ Same held-out set for every model, then broken down by platform. The aggregate c
 | RoBERTa (pretrained) | 0.5694 | 0.6218 | 0.5544 | 0.7853 | 0.231 |
 | VADER | 0.4381 | 0.4811 | 0.4252 | 0.5880 | 0.163 |
 
+![Macro F1 by platform, five models](docs/figures/sentiment_spread.svg)
+
 Fine-tuned DistilBERT beats logistic regression by **two points** on aggregate — thin enough that "just use logistic regression" is a fair challenge.
 
 Then look at the spread. Every other model swings 15 to 31 points depending on which platform it's handed. DistilBERT swings **two**. Logistic regression loses 15 points on tweets. Pretrained RoBERTa is the *best model in the study* on tweets at 0.7853 — it was pretrained on Twitter — and the worst overall, losing 23 points on Yelp prose.
@@ -33,6 +35,8 @@ Significant against logistic regression at p = 1.7 × 10⁻²¹ (McNemar's exact
 ---
 
 ## Architecture
+
+![System architecture — three stages](docs/figures/architecture.png)
 
 ```
 Reviews (Amazon · Yelp · Twitter)
@@ -55,6 +59,13 @@ Served as two containers: FastAPI backend, Streamlit frontend. Two guards sit in
 
 **Stack.** Python 3.12 · PyTorch · Hugging Face Transformers · sentence-transformers · FAISS · LangChain · Groq · BERTopic · UMAP · HDBSCAN · scikit-learn · spaCy · RAGAS · MLflow · FastAPI · Streamlit · Docker
 
+<details>
+<summary><strong>Full system architecture</strong> — containers, routes, services, data & external calls</summary>
+
+![Full system architecture](docs/figures/full_architecture.png)
+
+</details>
+
 ---
 
 ## Running it
@@ -76,6 +87,19 @@ streamlit run frontend/app.py
 Every `/api/*` route except `/api/health` requires an `x-api-key` header. Set `ENVIRONMENT=production` and the backend refuses to start unless a real key is configured.
 
 **Reproducibility.** Seeds fixed at 42 throughout, dependencies pinned, classical training and evaluation tracked in MLflow (`mlflow ui` → `localhost:5000`). Every table in [RESULTS.md](RESULTS.md) cites the file that produced it. Nothing reported was typed by hand.
+
+---
+
+## Screenshots
+
+<!--
+  Add your own screenshots here, e.g. after running `docker compose up --build`
+  and exercising the dashboard / chatbot. Save images to docs/figures/ and
+  reference them the same way the figures above are referenced:
+
+  ![Dashboard overview](docs/figures/screenshot-dashboard.png)
+  ![Chatbot in action](docs/figures/screenshot-chatbot.png)
+-->
 
 ---
 
