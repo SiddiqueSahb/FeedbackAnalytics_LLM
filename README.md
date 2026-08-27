@@ -1,4 +1,13 @@
-# FeedbackIQ
+# FeedbackAnalytics
+
+<img width="1470" height="826" alt="Screenshot 2026-08-27 at 4 54 02 PM" src="https://github.com/user-attachments/assets/e9e92581-72f3-4e3f-8948-a24097f3801e" />
+<img width="1470" height="829" alt="Screenshot 2026-08-27 at 4 54 12 PM" src="https://github.com/user-attachments/assets/ce10abd3-853b-4775-9ed1-9aef8dd4008f" />
+<img width="1470" height="956" alt="Screenshot 2026-08-27 at 4 55 01 PM" src="https://github.com/user-attachments/assets/a40e5446-30c0-4b2a-8fe1-4421ae8338ff" />
+<img width="1470" height="832" alt="Screenshot 2026-08-27 at 4 56 11 PM" src="https://github.com/user-attachments/assets/a4ae3da7-3ea3-4aa5-878d-aece2171e97b" />
+<img width="1470" height="830" alt="Screenshot 2026-08-27 at 4 55 46 PM" src="https://github.com/user-attachments/assets/e2660b28-6a74-4085-a027-eef4e25b3c8f" />
+
+
+
 
 **Fine-tuning a small transformer on multi-domain customer feedback — and measuring what fine-tuning actually buys you.**
 
@@ -36,7 +45,8 @@ Significant against logistic regression at p = 1.7 × 10⁻²¹ (McNemar's exact
 
 ## Architecture
 
-![System architecture — three stages](docs/figures/architecture.png)
+<img width="2272" height="2952" alt="fig_architecture_publication" src="https://github.com/user-attachments/assets/9a4bc880-4244-4153-be50-2b2ba893d81d" />
+
 
 ```
 Reviews (Amazon · Yelp · Twitter)
