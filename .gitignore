@@ -59,3 +59,8 @@ artifacts/
 *.pkl
 *.joblib
 *.parquet
+interview/
+
+# Submission artefacts
+*.zip
+*.docx
