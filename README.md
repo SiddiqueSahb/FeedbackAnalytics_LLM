@@ -603,19 +603,6 @@ Reproducibility for a stack that spans PyTorch, FAISS and spaCy, where local env
 
 ---
 
-## Resume highlights
-
-- Built an end-to-end NLP system over **642,692 multi-domain customer reviews**, spanning sentiment classification, unsupervised complaint discovery and retrieval-augmented question answering, served through a FastAPI backend and a six-page Streamlit dashboard.
-- Fine-tuned **DistilBERT** for three-class sentiment and benchmarked it against four alternatives on a shared held-out set of **128,539 reviews**, achieving **0.8375 macro F1** and a cross-platform spread of **0.020** against 0.151–0.311 for every competing model.
-- Diagnosed an anomalous result — a pretrained transformer scoring below logistic regression — through **three follow-up experiments** that isolated the cause to a single class, and validated all model comparisons with **McNemar's exact test** across ten pairs.
-- Designed a hybrid complaint categoriser combining **sentence-embedding shortlisting with zero-shot NLI reranking**, consolidating **121 BERTopic topics into a 24-category cross-domain taxonomy** evaluated without ground truth.
-- Engineered a **RAG pipeline over a FAISS index of 642,692 documents** with threshold-gated MMR retrieval, metadata-augmented prompts and per-answer source attribution, achieving **21.71 ms mean retrieval** at precision@3 of 0.90.
-- Ran a **controlled ablation** with retrieval held constant, quantifying a grounding-versus-responsiveness trade-off (**faithfulness +0.118, answer relevancy −0.202**) and capturing a hallucinated citation that metadata tagging prevented.
-- Deployed the system as **two Docker services** with health-gated startup, API-key authentication, a production boot guard, and **GitHub Actions CI** running lint and image builds.
-- Built a **fully reproducible evaluation harness** — seeds fixed, dependencies pinned, MLflow tracking — in which every reported figure is written to disk by a named script rather than transcribed by hand.
-
----
-
 ## License
 
 Released under the [MIT License](LICENSE).
