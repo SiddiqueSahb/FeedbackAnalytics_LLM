@@ -433,12 +433,35 @@ pytest tests/
 
 ## Screenshots
 
-| | |
-|---|---|
-| ![Dashboard](docs/images/dashboard.png) | ![RAG chat](docs/images/rag_chat.png) |
-| **Dashboard** — corpus KPIs and trends | **AI Assistant** — grounded answers with sources |
-| ![Analytics](docs/images/analytics.png) | ![Evaluation](docs/images/evaluation.png) |
-| **Analytics** — sentiment and category breakdowns | **Evaluation** — model comparison viewer |
+### Dashboard
+
+Corpus KPIs, sentiment by platform, rating distribution and trends.
+
+<img alt="Dashboard" src="https://github.com/user-attachments/assets/e9e92581-72f3-4e3f-8948-a24097f3801e" />
+
+### Review analysis
+
+Single review through the full pipeline — sentiment, category, similar reviews, LLM summary.
+
+<img alt="Review analysis" src="https://github.com/user-attachments/assets/ce10abd3-853b-4775-9ed1-9aef8dd4008f" />
+
+### Semantic search
+
+Meaning-based retrieval over the FAISS index with similarity scores.
+
+<img alt="Semantic search" src="https://github.com/user-attachments/assets/a40e5446-30c0-4b2a-8fe1-4421ae8338ff" />
+
+### AI assistant
+
+Grounded question answering — every answer lists the reviews it drew on.
+
+<img alt="AI assistant" src="https://github.com/user-attachments/assets/a4ae3da7-3ea3-4aa5-878d-aece2171e97b" />
+
+### Evaluation
+
+Stored model and pipeline metrics, read from data/results/.
+
+<img alt="Evaluation" src="https://github.com/user-attachments/assets/e2660b28-6a74-4085-a027-eef4e25b3c8f" />
 
 ---
 
